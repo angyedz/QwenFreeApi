@@ -135,6 +135,20 @@ const makeArrayContentStream = () => Readable.from([
     throw new Error('empty upstream response was accepted as a completion');
   }
 
+  let retryAttempts = 0;
+  await new Promise((resolve, reject) => {
+    const replacement = () => {
+      retryAttempts += 1;
+      return retryAttempts < 3 ? makeEmptyStream() : makeAnswerStreamWithoutTerminalEvent();
+    };
+    const response = { write() {}, end() { resolve(); } };
+    require('../src/chat-adapter').pipeThroughOpenAI(makeEmptyStream(), response, {
+      retryEmpty: replacement,
+      maxEmptyRetries: 3,
+    }).catch(reject);
+  });
+  if (retryAttempts !== 3) throw new Error(`stream retry count mismatch: ${retryAttempts}`);
+
   const messageResult = await collectNonStream(makeTerminalMessageStream());
   if (messageResult.choices[0].message.content !== 'Ответ из message') {
     throw new Error('terminal message content was not accepted');

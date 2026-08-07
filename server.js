@@ -119,6 +119,26 @@ app.post('/v1/chat/completions', async (req, res) => {
           toolParser: prepared.hasTools ? tools.createToolCallStreamParser() : null,
         });
       } catch (err) {
+        // A stale Qwen thread can accept the request and then close its SSE
+        // stream without emitting a completion. Retry once on a fresh thread,
+        // including for non-stream OpenAI clients.
+        if (/^Qwen upstream closed without a usable response \(frames=0/.test(err.message)) {
+          sessionStore.clear(sessionKey);
+          for (let attempt = 0; attempt < 3; attempt += 1) {
+            const retryPrepared = await chatAdapter.preparePublicPayload(publicBody, { compaction });
+            sessionStore.set(sessionKey, retryPrepared.chatId, { awaitingCompactedHistory: compaction });
+            const retry = await qwenClient.sendChatRequest(retryPrepared.qwenPayload);
+            if (!retry.status) continue;
+            try {
+              json = await chatAdapter.collectNonStream(retry.response, {
+                toolParser: retryPrepared.hasTools ? tools.createToolCallStreamParser() : null,
+              });
+              return res.json(json);
+            } catch (retryError) {
+              if (!/^Qwen upstream closed without a usable response \(frames=0/.test(retryError.message)) throw retryError;
+            }
+          }
+        }
         accountStore.markFailure(response.account, err.message);
         throw err;
       }
@@ -127,16 +147,20 @@ app.post('/v1/chat/completions', async (req, res) => {
 
     await chatAdapter.pipeThroughOpenAI(upstream, res, {
       toolParser: prepared.hasTools ? tools.createToolCallStreamParser() : null,
+      maxEmptyRetries: 3,
       onError: (error) => accountStore.markFailure(response.account, error.message),
       retryEmpty: async () => {
         // A zero-frame response usually means the upstream chat session died.
         // Reusing the same chat_id just reproduces the empty stream, so create
         // a fresh upstream session while preserving the original request.
         sessionStore.clear(sessionKey);
-        const retryPrepared = await chatAdapter.preparePublicPayload(publicBody);
-        sessionStore.set(sessionKey, retryPrepared.chatId, { awaitingCompactedHistory: compaction });
-        const retry = await qwenClient.sendChatRequest(retryPrepared.qwenPayload);
-        return retry.status ? retry.response : null;
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          const retryPrepared = await chatAdapter.preparePublicPayload(publicBody, { compaction });
+          sessionStore.set(sessionKey, retryPrepared.chatId, { awaitingCompactedHistory: compaction });
+          const retry = await qwenClient.sendChatRequest(retryPrepared.qwenPayload);
+          if (retry.status) return retry.response;
+        }
+        return null;
       },
     });
   } catch (err) {
@@ -172,14 +196,28 @@ function getOpenCodeSessionKey(req, body) {
     body.metadata?.conversationID;
   if (value) return String(value).trim();
 
-  // Some OpenAI-compatible clients omit all session metadata and may send a
-  // different subset of messages on every turn. Never derive this key from
-  // message content: after a tool call that would create a new Qwen chat and
-  // make the model forget the original request. Explicit session metadata
-  // above remains the preferred isolation mechanism.
+  // OpenCode normally supplies one of the explicit IDs above. For clients that
+  // omit them, use the first user turn as the conversation boundary instead of
+  // one global model/user key. The full message list is sent on follow-ups, so
+  // this remains stable through tool calls while separating newly-created chats.
+  const messages = Array.isArray(body.messages) ? body.messages : [];
+  const firstUser = messages.find((message) => message?.role === 'user');
+  const firstContent = extractSessionText(firstUser?.content);
   const userKey = body.user || body.metadata?.user_id || body.metadata?.userId || '';
-  const seed = JSON.stringify({ model: body.model || '', user: userKey || 'default' });
-  return `derived-${crypto.createHash('sha256').update(seed).digest('hex').slice(0, 32)}`;
+  const seed = JSON.stringify({ model: body.model || '', user: userKey || 'default', firstUser: firstContent });
+  return `derived-v2-${crypto.createHash('sha256').update(seed).digest('hex').slice(0, 32)}`;
+}
+
+function extractSessionText(content) {
+  if (typeof content === 'string') return content.trim().slice(0, 4000);
+  if (Array.isArray(content)) {
+    return content.map((part) => {
+      if (typeof part === 'string') return part;
+      return part?.text || part?.content || '';
+    }).join(' ').trim().slice(0, 4000);
+  }
+  if (content && typeof content === 'object') return extractSessionText(content.text || content.content || '');
+  return '';
 }
 
 function isCompactionRequest(req, body) {

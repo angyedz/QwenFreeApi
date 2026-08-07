@@ -44,6 +44,13 @@ function extractText(content) {
   return '';
 }
 
+function compactText(value, limit = config.AGENT_MESSAGE_MAX_CHARS) {
+  const text = extractText(value).trim();
+  if (text.length <= limit) return text;
+  const keep = Math.max(1000, Math.floor(limit * 0.7));
+  return `${text.slice(0, keep)}\n...[compacted ${text.length - limit} chars]...\n${text.slice(-Math.max(500, limit - keep - 40))}`;
+}
+
 const HISTORY_MARKER = '# Conversation history (JSONL)';
 const CURRENT_MESSAGE_MARKER = '# Current message';
 const TOOL_FOLLOW_UP_MARKER = '# Required tool follow-up';
@@ -108,7 +115,7 @@ function foldMessages(messages, toolPrompt = '', options = {}) {
     last?.role === 'user' && extractText(last.content).trim().startsWith('<tool_response')
   );
   if (options.currentOnly) {
-    const currentText = extractText(last.content).trim();
+    const currentText = compactText(last.content);
     const parts = [];
      if (toolPrompt) parts.push(toolPrompt);
      if (options.compaction) parts.push(COMPACTION_PROMPT);
@@ -127,16 +134,9 @@ function foldMessages(messages, toolPrompt = '', options = {}) {
   }
   const history = folded.slice(0, -1);
 
-  const compact = (value, limit = config.AGENT_MESSAGE_MAX_CHARS) => {
-    const text = extractText(value).trim();
-    if (text.length <= limit) return text;
-    const keep = Math.max(1000, Math.floor(limit * 0.7));
-    return `${text.slice(0, keep)}\n...[compacted ${text.length - limit} chars]...\n${text.slice(-Math.max(500, limit - keep - 40))}`;
-  };
-
   const historyLines = history
     .map((m) => {
-      const s = m.role === 'system' ? compactSystemInstructions(m.content) : compact(m.content);
+      const s = m.role === 'system' ? compactSystemInstructions(m.content) : compactText(m.content);
       return s ? JSON.stringify({ role: m.role, content: s }) : '';
     })
     .filter(Boolean);
@@ -157,7 +157,7 @@ function foldMessages(messages, toolPrompt = '', options = {}) {
     historyText = [first, '... [older history compacted] ...', ...recent].filter(Boolean).join('\n');
   }
 
-  const lastText = extractText(last.content).trim();
+  const lastText = compactText(last.content);
   const parts = [];
    if (toolPrompt) parts.push(toolPrompt);
    if (options.compaction) parts.push(COMPACTION_PROMPT);
@@ -575,7 +575,8 @@ async function collectNonStream(stream, opts = {}) {
 async function pipeThroughOpenAI(stream, res, opts = {}) {
   const toolParser = opts.toolParser || null;
   const retryEmpty = typeof opts.retryEmpty === 'function' ? opts.retryEmpty : null;
-  let retryUsed = false;
+  const maxEmptyRetries = Math.max(0, Number(opts.maxEmptyRetries ?? 3));
+  let emptyRetries = 0;
 
   const pipe = async (currentStream) => new Promise((resolve) => {
     parseQwenSSE(
@@ -585,9 +586,9 @@ async function pipeThroughOpenAI(stream, res, opts = {}) {
       },
       (error) => {
         if (error) {
-          if (!retryUsed && retryEmpty && /^Qwen upstream closed without a usable response \(frames=0/.test(error.message)) {
-            retryUsed = true;
-            Promise.resolve(retryEmpty(error)).then((replacement) => {
+          if (emptyRetries < maxEmptyRetries && retryEmpty && /^Qwen upstream closed without a usable response \(frames=0/.test(error.message)) {
+            emptyRetries += 1;
+            Promise.resolve(retryEmpty(error, emptyRetries)).then((replacement) => {
               if (replacement) {
                 pipe(replacement).then(resolve);
                 return;
