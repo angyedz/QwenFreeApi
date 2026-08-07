@@ -295,7 +295,14 @@ function parseQwenSSE(stream, onData, onDone, opts = {}) {
 
     // Некоторые версии Qwen завершают SSE кадром `status: finished` без
     // отдельного `data: true` или `[DONE]`.
-    if ((delta.status === 'finished' && phase === 'answer') || choice.finish_reason) close();
+    // В зависимости от типа запроса Qwen может не прислать phase в финальном
+    // кадре. Не закрываем thinking-кадры, но принимаем finished для answer
+    // или кадра, содержащего поле content.
+    const finishedAnswer =
+      delta.status === 'finished' &&
+      (phase === 'answer' ||
+        (phase === undefined && Object.prototype.hasOwnProperty.call(delta, 'content')));
+    if (finishedAnswer || choice.finish_reason) close();
   };
 
   stream.on('data', (buf) => {

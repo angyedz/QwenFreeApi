@@ -25,6 +25,13 @@ const makeFailedStream = () => {
   return stream;
 };
 
+const makeFinishedWithoutPhaseStream = () => Readable.from([
+  Buffer.from([
+    'data: {"choices":[{"delta":{"content":"Ответ","status":"typing"}}]}\n',
+    'data: {"choices":[{"delta":{"content":"","status":"finished"}}]}\n',
+  ].join('')),
+]);
+
 (async () => {
   // 1) Streaming
   const chunks = [];
@@ -44,6 +51,18 @@ const makeFailedStream = () => {
   const json = await collectNonStream(makeStream());
   console.log('non-stream content:', JSON.stringify(json.choices[0].message.content));
   if (json.choices[0].message.content !== 'Hello, world!') throw new Error('non-stream mismatch');
+
+  // Qwen may omit phase in the terminal answer frame.
+  let finishedWithoutPhase;
+  await new Promise((resolve, reject) => {
+    collectNonStream(makeFinishedWithoutPhaseStream()).then((value) => {
+      finishedWithoutPhase = value;
+      resolve();
+    }, reject);
+  });
+  if (finishedWithoutPhase.choices[0].message.content !== 'Ответ') {
+    throw new Error('terminal answer without phase was not accepted');
+  }
 
   // Upstream failures must not be converted into a successful stream ending.
   let streamError;
