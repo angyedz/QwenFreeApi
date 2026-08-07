@@ -208,10 +208,10 @@ function parseQwenSSE(stream, onData, onDone, opts = {}) {
     }
   };
 
-  const close = () => {
+  const close = (error = null) => {
     if (!closed) {
       closed = true;
-      if (onDone) onDone();
+      if (onDone) onDone(error);
     }
   };
 
@@ -220,7 +220,11 @@ function parseQwenSSE(stream, onData, onDone, opts = {}) {
     const trimmed = String(raw).trim();
     if (!trimmed.startsWith('data:')) return;
     const payload = trimmed.slice(5).trim();
-    if (!payload || payload === '[DONE]') return;
+    if (!payload) return;
+    if (payload === '[DONE]') {
+      close();
+      return;
+    }
 
     let obj;
     try {
@@ -297,9 +301,16 @@ function parseQwenSSE(stream, onData, onDone, opts = {}) {
       }
       if (tail.calls.length > 0) writeToolCallDeltas(tail.calls);
     }
-    close();
+    if (!closed) close(new Error('Qwen upstream stream ended without a terminal event'));
   });
-  stream.on('error', close);
+  stream.on('error', (error) => close(error));
+  // A network reset can emit `close` without `end`. Do not turn that into a
+  // successful [DONE], otherwise clients see a truncated answer as complete.
+  stream.on('close', () => {
+    if (!closed && !stream.readableEnded) {
+      close(new Error('Qwen upstream stream closed unexpectedly'));
+    }
+  });
 
   return stream;
 }
@@ -310,7 +321,7 @@ async function collectNonStream(stream, opts = {}) {
   const contentParts = [];
   const reasoningParts = [];
   const toolCalls = [];
-  await new Promise((resolve) => {
+  await new Promise((resolve, reject) => {
     parseQwenSSE(
       stream,
       (line) => {
@@ -337,7 +348,10 @@ async function collectNonStream(stream, opts = {}) {
           }
         }
       },
-      resolve,
+      (error) => {
+        if (error) reject(error);
+        else resolve();
+      },
       { toolParser }
     );
   });
@@ -383,7 +397,19 @@ async function pipeThroughOpenAI(stream, res, opts = {}) {
       (line) => {
         res.write(line);
       },
-      () => {
+      (error) => {
+        if (error) {
+          const errorChunk = {
+            error: {
+              message: error.message || 'Qwen upstream stream failed',
+              type: 'upstream_error',
+            },
+          };
+          res.write(`data: ${JSON.stringify(errorChunk)}\n\n`);
+          res.end();
+          resolve();
+          return;
+        }
         const finalChunk = {
           id: `chatcmpl-${Date.now()}`,
           object: 'chat.completion.chunk',

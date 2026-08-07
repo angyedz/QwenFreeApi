@@ -5,7 +5,9 @@
  * login.js — сохраняет аккаунт Qwen Chat в config/accounts/<id>.json.
  *
  * Открывает настоящий браузер (Playwright Chromium) на chat.qwen.ai.
- * Ты логинишься вручную (или уже залогинен в постоянном профиле). Скрипт
+ * Каждый запуск использует новый неперсистентный context, поэтому cookies,
+ * localStorage, sessionStorage и кэш не переносятся из предыдущих запусков.
+ * Ты логинишься вручную. Скрипт
  * вытаскивает из localStorage JWT `token` и весь cookie-джар и сохраняет их.
  * Это даёт серверу реальные браузерные cookies (cna, acw_tc, ...), которые
  * вместе со свежими SSXMOD cookies (генерятся на каждый запрос) проходят WAF.
@@ -17,7 +19,6 @@
  *   --account <id>    имя аккаунта в пуле
  *   --manual          без Playwright: вставить токен вручную
  */
-const path = require('path');
 const config = require('../src/config');
 const accountStore = require('../src/account-store');
 const { logger } = require('../src/util');
@@ -72,24 +73,21 @@ try {
 
 const cookieOnly = args.includes('--cookie-only');
 const headless = args.includes('--headless');
-const profileArgIdx = args.indexOf('--profile');
-const profileDir =
-  profileArgIdx >= 0
-    ? path.resolve(args[profileArgIdx + 1])
-    : path.join(config.CONFIG_DIR, 'browser-profile');
-
 (async () => {
   logger.info('Запуск Chromium… (если WAF просит слайдер — пройди его в окне)', 'LOGIN');
 
-  const browser = await playwright.chromium.launchPersistentContext(profileDir, {
+  const browser = await playwright.chromium.launch({
     headless,
     channel: process.env.PLAYWRIGHT_CHANNEL || undefined,
-    userAgent: config.USER_AGENT,
-    locale: 'zh-CN',
     args: ['--disable-blink-features=AutomationControlled', '--no-first-run'],
   });
+  // New in-memory context prevents state from leaking between browser runs.
+  const context = await browser.newContext({
+    userAgent: config.USER_AGENT,
+    locale: 'zh-CN',
+  });
 
-  const page = browser.pages()[0] || (await browser.newPage());
+  const page = await context.newPage();
   await page.goto(config.BASE_URL, { waitUntil: 'domcontentloaded' });
 
   if (!cookieOnly) {
@@ -122,7 +120,7 @@ const profileDir =
   // 2) Cookie-джар
   let cookieJar = [];
   try {
-    cookieJar = await browser.cookies();
+    cookieJar = await context.cookies();
   } catch (e) {
     logger.warn('Не удалось снять cookies: ' + e.message, 'LOGIN');
   }
@@ -154,7 +152,6 @@ const profileDir =
     email: 'playwright-capture',
     cookie: persistable,
     savedAt: Date.now(),
-    profileDir,
   }, accountId);
 
   logger.info(`Сохранено ${persistable.length} cookies + token.`, 'LOGIN');

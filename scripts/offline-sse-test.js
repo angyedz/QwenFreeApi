@@ -19,6 +19,12 @@ const SAMPLE = [
 
 const makeStream = () => Readable.from([Buffer.from(SAMPLE)]);
 
+const makeFailedStream = () => {
+  const stream = new Readable({ read() {} });
+  process.nextTick(() => stream.destroy(new Error('simulated upstream failure')));
+  return stream;
+};
+
 (async () => {
   // 1) Streaming
   const chunks = [];
@@ -38,6 +44,18 @@ const makeStream = () => Readable.from([Buffer.from(SAMPLE)]);
   const json = await collectNonStream(makeStream());
   console.log('non-stream content:', JSON.stringify(json.choices[0].message.content));
   if (json.choices[0].message.content !== 'Hello, world!') throw new Error('non-stream mismatch');
+
+  // Upstream failures must not be converted into a successful stream ending.
+  let streamError;
+  await new Promise((resolve) => {
+    parseQwenSSE(makeFailedStream(), () => {}, (error) => {
+      streamError = error;
+      resolve();
+    });
+  });
+  if (!streamError || streamError.message !== 'simulated upstream failure') {
+    throw new Error('upstream stream error was swallowed');
+  }
 
   console.log('\nSSE ADAPTER OK');
 })().catch((e) => {
