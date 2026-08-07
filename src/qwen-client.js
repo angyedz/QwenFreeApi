@@ -26,8 +26,9 @@ const isWafResponse = (status, contentType, bodyText) => {
   return false;
 };
 
-function buildHeaders(refererPath) {
+function buildHeaders(refererPath, account) {
   const cookie = accountStore.buildCookieHeader(
+    account,
     ssxmodManager.getSsxmodItna(),
     ssxmodManager.getSsxmodItna2()
   );
@@ -60,7 +61,9 @@ function buildHeaders(refererPath) {
  * Получить chat_id для новой беседы.
  */
 async function generateChatID(model, chatType = 't2t') {
-  try {
+  const candidates = accountStore.candidates();
+  if (!candidates.length) return null;
+  for (const account of candidates) try {
     const res = await axios.post(
       `${config.BASE_URL}/api/v2/chats/new`,
       {
@@ -71,25 +74,29 @@ async function generateChatID(model, chatType = 't2t') {
         chat_type: chatType,
         chat_mode: 'normal',
       },
-      { headers: buildHeaders('/c/new-chat'), timeout: 30000 }
+      { headers: buildHeaders('/c/new-chat', account), timeout: 30000 }
     );
-    if (isWafResponse(res.status, res.headers['content-type'], JSON.stringify(res.data))) {
-      logger.error('WAF challenge on /chats/new — session probably stale, re-login', 'QWEN');
-      return null;
+    if (isWafResponse(res.status, res.headers['content-type'], JSON.stringify(res.data)) || res.status === 401 || res.status === 403) {
+      accountStore.markFailure(account, 'WAF challenge on /chats/new', true);
+      continue;
     }
-    return (res.data && res.data.data && res.data.data.id) || null;
+    const id = (res.data && res.data.data && res.data.data.id) || null;
+    if (id) accountStore.markSuccess(account);
+    else accountStore.markFailure(account, 'Qwen did not return a chat id');
+    if (id) return id;
   } catch (err) {
-    logger.error(`generateChatId failed: ${err.message}`, 'QWEN', err);
-    return null;
+    accountStore.markFailure(account, err.message, isWafResponse(err.response && err.response.status, err.response && err.response.headers && err.response.headers['content-type'], String(err.response && err.response.data || '')));
+    logger.warn(`generateChatId failed for ${account.id}: ${err.message}`, 'QWEN');
   }
+  return null;
 }
 
 /**
  * Отправить chat request. `payload` уже включает chat_id/chatId.
  */
 async function sendChatRequest(payload) {
-  const account = accountStore.current();
-  if (!account || !account.token) {
+  const candidates = accountStore.candidates();
+  if (!candidates.length) {
     return { status: false, message: 'No account token configured' };
   }
 
@@ -98,18 +105,20 @@ async function sendChatRequest(payload) {
     return { status: false, message: 'Missing chat_id in payload' };
   }
 
-  try {
+  for (const account of candidates) try {
     const url = `${config.BASE_URL}/api/v2/chat/completions?chat_id=${chatId}`;
     const response = await axios.post(url, payload, {
-      headers: buildHeaders(`/c/${chatId}`),
+       headers: buildHeaders(`/c/${chatId}`, account),
       responseType: 'stream',
       timeout: 10 * 60 * 1000,
     });
 
     if (response.status === 200) {
+      accountStore.markSuccess(account);
       return { status: true, response: response.data };
     }
-    return { status: false, message: `Unexpected status ${response.status}` };
+    accountStore.markFailure(account, `Unexpected status ${response.status}`);
+    continue;
   } catch (err) {
     const status = err.response ? err.response.status : null;
     const ct = err.response ? err.response.headers['content-type'] : '';
@@ -121,13 +130,16 @@ async function sendChatRequest(payload) {
     } catch (_) {
       /* ignore */
     }
-    if (isWafResponse(status, ct, bodyText)) {
-      logger.error(`WAF/session block (status ${status}). Re-run 'npm run login'.`, 'QWEN');
-      return { status: false, message: 'Qwen session expired or blocked by WAF. Re-login.' };
+    if (status === 401 || status === 403 || isWafResponse(status, ct, bodyText)) {
+      accountStore.markFailure(account, 'Qwen session expired or blocked by WAF', true);
+      logger.warn(`WAF/session block for ${account.id} (status ${status}), trying next account`, 'QWEN');
+      continue;
     }
+    accountStore.markFailure(account, err.message);
     logger.error(`chat completion failed: ${err.message}`, 'QWEN', err);
-    return { status: false, message: err.message };
+    continue;
   }
+  return { status: false, message: 'All Qwen accounts are unavailable. Re-login an account with `npm run accounts`.' };
 }
 
 function readStream(stream) {

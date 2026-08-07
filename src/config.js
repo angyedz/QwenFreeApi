@@ -6,6 +6,7 @@ const fs = require('fs');
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 const CONFIG_DIR = path.join(PROJECT_ROOT, 'config');
 const ACCOUNT_FILE = path.join(CONFIG_DIR, 'account.json');
+const ACCOUNTS_DIR = path.join(CONFIG_DIR, 'accounts');
 const CACHE_FILE = path.join(CONFIG_DIR, 'models-cache.json');
 
 const BASE_URL = 'https://chat.qwen.ai';
@@ -56,6 +57,7 @@ module.exports = {
   PROJECT_ROOT,
   CONFIG_DIR,
   ACCOUNT_FILE,
+  ACCOUNTS_DIR,
   CACHE_FILE,
   BASE_URL,
   QWEN_WEB_VERSION,

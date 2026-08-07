@@ -23,7 +23,7 @@ const save = !process.argv.includes('--no-save');
 (async () => {
   ssxmodManager.init();
   if (!accountStore.load() && !accountStore.isAccount()) {
-    console.log('Нет account.json. Сначала: npm run login');
+    console.log('Нет аккаунтов. Сначала: npm run login или npm run accounts');
     process.exit(1);
   }
   const cookie = accountStore.buildCookieHeader(

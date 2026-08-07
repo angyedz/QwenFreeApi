@@ -3,6 +3,8 @@ node_modules/
 # Local credentials and generated runtime data
 .env
 config/account.json
+config/account.json.migrated
+config/accounts/*.json
 config/models-cache.json
 config/chats/*.json
 config/browser-profile/
@@ -23,3 +25,4 @@ test-results/
 Thumbs.db
 .idea/
 .vscode/
+post.md

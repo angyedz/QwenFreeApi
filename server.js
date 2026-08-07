@@ -122,14 +122,11 @@ ssxmodManager.init();
 toolExecutor.initWorkspace();
 web.attachWeb(app);
 
-if (!accountStore.isAccount()) {
-  try {
-    if (accountStore.load()) {
-      logger.info('Account loaded from config/account.json', 'ACCOUNT');
-    }
-  } catch (e) {
-    logger.warn(`No account yet (${e.message}). Run 'npm run login'.`, 'ACCOUNT');
-  }
+try {
+  accountStore.load();
+  logger.info(`${accountStore.list().length} Qwen account(s) loaded`, 'ACCOUNT');
+} catch (e) {
+  logger.warn(`No account yet (${e.message}). Run 'npm run login' or 'npm run accounts'.`, 'ACCOUNT');
 }
 
 app.listen(PORT, () => {

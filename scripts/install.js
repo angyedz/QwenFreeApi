@@ -21,6 +21,7 @@ const readline = require('readline');
 const ROOT = path.resolve(__dirname, '..');
 const CONFIG_DIR = path.join(ROOT, 'config');
 const ACCOUNT_FILE = path.join(CONFIG_DIR, 'account.json');
+const ACCOUNTS_DIR = path.join(CONFIG_DIR, 'accounts');
 
 const rl = readline.createInterface({
   input: process.stdin,
@@ -248,8 +249,8 @@ function providerConfig() {
 async function summary() {
   heading('Итог');
   line();
-  const acc = fs.existsSync(ACCOUNT_FILE);
-  console.log('  Аккаунт Qwen        : ' + (acc ? 'OK' : 'не настроен (npm run login)'));
+  const acc = fs.existsSync(ACCOUNT_FILE) || (fs.existsSync(ACCOUNTS_DIR) && fs.readdirSync(ACCOUNTS_DIR).some((name) => name.endsWith('.json')));
+  console.log('  Аккаунты Qwen       : ' + (acc ? 'OK' : 'не настроены (npm run accounts)'));
   console.log('  Модели              : ' + (fs.existsSync(path.join(CONFIG_DIR, 'models-cache.json')) ? 'кэш есть' : 'npm run models'));
   console.log('  Веб-чат             : http://localhost:3265/');
   console.log('  OpenAI API          : http://localhost:3265/v1');

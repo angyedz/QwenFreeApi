@@ -2,7 +2,7 @@
 'use strict';
 
 /**
- * login.js — сохраняет аккаунт Qwen Chat в config/account.json.
+ * login.js — сохраняет аккаунт Qwen Chat в config/accounts/<id>.json.
  *
  * Открывает настоящий браузер (Playwright Chromium) на chat.qwen.ai.
  * Ты логинишься вручную (или уже залогинен в постоянном профиле). Скрипт
@@ -14,6 +14,7 @@
  *   --cookie-only     не ждать логина, просто забрать куки из профиля (быстрее)
  *   --headless        headless (обычно не пройдёт капчу)
  *   --profile <path>  путь постоянного профиля (переиспользовать логин)
+ *   --account <id>    имя аккаунта в пуле
  *   --manual          без Playwright: вставить токен вручную
  */
 const path = require('path');
@@ -23,6 +24,8 @@ const { logger } = require('../src/util');
 
 const args = process.argv.slice(2);
 const useManual = args.includes('--manual');
+const accountArgIdx = args.indexOf('--account');
+const accountId = accountArgIdx >= 0 ? args[accountArgIdx + 1] : undefined;
 
 // ---- Ручной ввод (без Playwright) ----
 if (useManual) {
@@ -47,7 +50,7 @@ if (useManual) {
         logger.error('Пустой токен.', 'LOGIN');
         process.exit(1);
       }
-      accountStore.save({ token, email: 'manual', cookie: [], savedAt: Date.now() });
+       accountStore.save({ token, email: accountId || 'manual', cookie: [], savedAt: Date.now() }, accountId);
       logger.info('Токен сохранён. Запусти `npm start`.', 'LOGIN');
       process.exit(0);
     }
@@ -152,7 +155,7 @@ const profileDir =
     cookie: persistable,
     savedAt: Date.now(),
     profileDir,
-  });
+  }, accountId);
 
   logger.info(`Сохранено ${persistable.length} cookies + token.`, 'LOGIN');
   logger.info(
