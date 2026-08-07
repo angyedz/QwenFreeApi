@@ -292,6 +292,10 @@ function parseQwenSSE(stream, onData, onDone, opts = {}) {
       chunk.choices[0].delta.content = content;
       onData(`data: ${JSON.stringify(chunk)}\n\n`);
     }
+
+    // Некоторые версии Qwen завершают SSE кадром `status: finished` без
+    // отдельного `data: true` или `[DONE]`.
+    if ((delta.status === 'finished' && phase === 'answer') || choice.finish_reason) close();
   };
 
   stream.on('data', (buf) => {
