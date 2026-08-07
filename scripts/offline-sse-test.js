@@ -32,6 +32,24 @@ const makeFinishedWithoutPhaseStream = () => Readable.from([
   ].join('')),
 ]);
 
+const makeToolStreamWithoutTerminalEvent = () => Readable.from([
+  Buffer.from([
+    'data: {"choices":[{"delta":{"content":"<tool_call>\\n{\\"name\\":\\"bash\\",\\"arguments\\":{\\"command\\":\\"pwd\\"}}\\n</tool_call>"}}]}\n',
+  ].join('')),
+]);
+
+const makeAnswerStreamWithoutTerminalEvent = () => Readable.from([
+  Buffer.from('data: {"choices":[{"delta":{"content":"Ответ без DONE"}}]}\n'),
+]);
+
+const makeStateOnlyStreamWithoutTerminalEvent = () => Readable.from([
+  Buffer.from('data: {"choices":[{"delta":{"phase":"answer","status":"typing"}}]}\n'),
+]);
+
+const makeMetadataOnlyStreamWithoutTerminalEvent = () => Readable.from([
+  Buffer.from('data: {"response.created":{"response_id":"r1"}}\n'),
+]);
+
 (async () => {
   // 1) Streaming
   const chunks = [];
@@ -63,6 +81,23 @@ const makeFinishedWithoutPhaseStream = () => Readable.from([
   if (finishedWithoutPhase.choices[0].message.content !== 'Ответ') {
     throw new Error('terminal answer without phase was not accepted');
   }
+
+  // Qwen can close after a complete tool call without [DONE] or finish_reason.
+  const toolResult = await collectNonStream(makeToolStreamWithoutTerminalEvent(), {
+    toolParser: require('../src/tools').createToolCallStreamParser(),
+  });
+  const toolCall = toolResult.choices[0].message.tool_calls?.[0];
+  if (!toolCall || toolCall.function.name !== 'bash') {
+    throw new Error('tool call without terminal event was not accepted');
+  }
+
+  const answerResult = await collectNonStream(makeAnswerStreamWithoutTerminalEvent());
+  if (answerResult.choices[0].message.content !== 'Ответ без DONE') {
+    throw new Error('answer without terminal event was not accepted');
+  }
+
+  await collectNonStream(makeStateOnlyStreamWithoutTerminalEvent());
+  await collectNonStream(makeMetadataOnlyStreamWithoutTerminalEvent());
 
   // Upstream failures must not be converted into a successful stream ending.
   let streamError;

@@ -164,6 +164,8 @@ function parseQwenSSE(stream, onData, onDone, opts = {}) {
   let emittedSummaryCount = 0;
   let acceptedResponseId = null;
   let idleTimer = null;
+  let emittedOutput = false;
+  let receivedUpstreamFrame = false;
 
   // Upstream часто открывает несколько конкурирующих кандидатных ответов
   // (разные response_id), чьи инкрементальные кадры перемешаны. Локимся на
@@ -189,6 +191,7 @@ function parseQwenSSE(stream, onData, onDone, opts = {}) {
   const writeToolCallDeltas = (calls) => {
     const ARG_CHUNK = 24;
     for (const call of calls) {
+      emittedOutput = true;
       const header = chunkId();
       header.choices[0].delta.tool_calls = [
         {
@@ -245,6 +248,7 @@ function parseQwenSSE(stream, onData, onDone, opts = {}) {
     } catch (_) {
       return;
     }
+    receivedUpstreamFrame = true;
     if (obj === true || obj.data === true) return close();
     if (obj['response.created'] || obj['response.updated']) return;
     if (!acceptFrame(obj)) return;
@@ -274,6 +278,7 @@ function parseQwenSSE(stream, onData, onDone, opts = {}) {
     }
 
     if (reasoning) {
+      emittedOutput = true;
       const chunk = chunkId();
       chunk.choices[0].delta.reasoning_content = reasoning;
       onData(`data: ${JSON.stringify(chunk)}\n\n`);
@@ -282,12 +287,14 @@ function parseQwenSSE(stream, onData, onDone, opts = {}) {
     if (content && toolParser) {
       const parsed = toolParser.push(content);
       if (parsed.textDelta) {
+        emittedOutput = true;
         const chunk = chunkId();
         chunk.choices[0].delta.content = parsed.textDelta;
         onData(`data: ${JSON.stringify(chunk)}\n\n`);
       }
       if (parsed.calls.length > 0) writeToolCallDeltas(parsed.calls);
     } else if (content) {
+      emittedOutput = true;
       const chunk = chunkId();
       chunk.choices[0].delta.content = content;
       onData(`data: ${JSON.stringify(chunk)}\n\n`);
@@ -320,13 +327,23 @@ function parseQwenSSE(stream, onData, onDone, opts = {}) {
     if (toolParser) {
       const tail = toolParser.flush();
       if (tail.textDelta) {
+        emittedOutput = true;
         const chunk = chunkId();
         chunk.choices[0].delta.content = tail.textDelta;
         onData(`data: ${JSON.stringify(chunk)}\n\n`);
       }
       if (tail.calls.length > 0) writeToolCallDeltas(tail.calls);
     }
-    if (!closed) close(new Error('Qwen upstream stream ended without a terminal event'));
+    // Qwen may close the SSE connection after sending response frames but omit
+    // [DONE] and finish_reason. An orderly EOF after an accepted response is
+    // still a completed upstream turn; this is common after long tool rounds.
+    if (!closed) {
+      close(
+        receivedUpstreamFrame
+          ? null
+          : new Error('Qwen upstream stream ended without a terminal event'),
+      );
+    }
   });
   stream.on('error', (error) => close(error));
   // A network reset can emit `close` without `end`. Do not turn that into a
