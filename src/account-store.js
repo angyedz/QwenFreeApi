@@ -82,7 +82,15 @@ function reset(account) {
 }
 
 function save(data, requestedId) {
-  const account = normalize(data, requestedId || data.id || data.email || `account-${accounts.size + 1}`);
+  // Без явного ID каждый импорт должен создавать новый аккаунт, а не
+  // перезаписывать служебные email `manual`/`playwright-capture`.
+  const explicitId = requestedId || (data && data.id);
+  let id = explicitId || `account-${accounts.size + 1}`;
+  let nextNumber = accounts.size + 1;
+  while (!explicitId && accounts.has(safeId(id))) {
+    id = `account-${++nextNumber}`;
+  }
+  const account = normalize(data, id);
   accounts.set(account.id, account);
   persist(account);
   activeId = account.id;

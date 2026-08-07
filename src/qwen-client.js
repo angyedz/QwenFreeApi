@@ -115,7 +115,7 @@ async function sendChatRequest(payload) {
 
     if (response.status === 200) {
       accountStore.markSuccess(account);
-      return { status: true, response: response.data };
+      return { status: true, response: response.data, account };
     }
     accountStore.markFailure(account, `Unexpected status ${response.status}`);
     continue;

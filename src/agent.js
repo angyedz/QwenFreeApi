@@ -118,6 +118,9 @@ function consumeProxyStream(proxyStream, emit) {
       });
     });
     proxyStream.on('error', (err) => reject(err));
+    proxyStream.on('close', () => {
+      if (!proxyStream.readableEnded) reject(new Error('Proxy stream closed unexpectedly'));
+    });
   });
 }
 

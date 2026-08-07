@@ -57,6 +57,19 @@ const makeFailedStream = () => {
     throw new Error('upstream stream error was swallowed');
   }
 
+  // An upstream that stops sending data must not leave the request pending.
+  let timeoutError;
+  await new Promise((resolve) => {
+    const idleStream = new Readable({ read() {} });
+    parseQwenSSE(idleStream, () => {}, (error) => {
+      timeoutError = error;
+      resolve();
+    }, { idleTimeout: 10 });
+  });
+  if (!timeoutError || !/timed out/.test(timeoutError.message)) {
+    throw new Error('idle upstream stream was not timed out');
+  }
+
   console.log('\nSSE ADAPTER OK');
 })().catch((e) => {
   console.error('FAIL:', e.message);

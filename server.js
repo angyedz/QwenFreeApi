@@ -98,14 +98,21 @@ app.post('/v1/chat/completions', async (req, res) => {
     res.setHeader('Connection', 'keep-alive');
 
     if (!streamRequested) {
-      const json = await chatAdapter.collectNonStream(upstream, {
-        toolParser: prepared.hasTools ? tools.createToolCallStreamParser() : null,
-      });
+      let json;
+      try {
+        json = await chatAdapter.collectNonStream(upstream, {
+          toolParser: prepared.hasTools ? tools.createToolCallStreamParser() : null,
+        });
+      } catch (err) {
+        accountStore.markFailure(response.account, err.message);
+        throw err;
+      }
       return res.json(json);
     }
 
     await chatAdapter.pipeThroughOpenAI(upstream, res, {
       toolParser: prepared.hasTools ? tools.createToolCallStreamParser() : null,
+      onError: (error) => accountStore.markFailure(response.account, error.message),
     });
   } catch (err) {
     logger.error(`[chat/completions] ${err.message}`, 'SERVER', err);

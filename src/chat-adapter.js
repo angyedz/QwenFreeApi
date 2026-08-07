@@ -156,12 +156,14 @@ const THINK_PHASES = new Set(['think', 'thinking', 'thinking_summary']);
  */
 function parseQwenSSE(stream, onData, onDone, opts = {}) {
   const toolParser = opts.toolParser || null;
+  const idleTimeout = Number(opts.idleTimeout || config.STREAM_IDLE_TIMEOUT_MS);
 
   let buffer = '';
   let seq = 0;
   let closed = false;
   let emittedSummaryCount = 0;
   let acceptedResponseId = null;
+  let idleTimer = null;
 
   // Upstream часто открывает несколько конкурирующих кандидатных ответов
   // (разные response_id), чьи инкрементальные кадры перемешаны. Локимся на
@@ -211,8 +213,19 @@ function parseQwenSSE(stream, onData, onDone, opts = {}) {
   const close = (error = null) => {
     if (!closed) {
       closed = true;
+      if (idleTimer) clearTimeout(idleTimer);
       if (onDone) onDone(error);
     }
+  };
+
+  const armIdleTimer = () => {
+    if (!idleTimeout || idleTimeout <= 0) return;
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      const error = new Error(`Qwen upstream stream timed out after ${idleTimeout}ms without data`);
+      close(error);
+      if (typeof stream.destroy === 'function') stream.destroy(error);
+    }, idleTimeout);
   };
 
   const handleLine = (raw) => {
@@ -282,6 +295,7 @@ function parseQwenSSE(stream, onData, onDone, opts = {}) {
   };
 
   stream.on('data', (buf) => {
+    armIdleTimer();
     buffer += buf.toString('utf8');
     let idx;
     while ((idx = buffer.indexOf('\n')) !== -1) {
@@ -311,6 +325,8 @@ function parseQwenSSE(stream, onData, onDone, opts = {}) {
       close(new Error('Qwen upstream stream closed unexpectedly'));
     }
   });
+
+  armIdleTimer();
 
   return stream;
 }
@@ -406,6 +422,7 @@ async function pipeThroughOpenAI(stream, res, opts = {}) {
             },
           };
           res.write(`data: ${JSON.stringify(errorChunk)}\n\n`);
+          if (opts.onError) opts.onError(error);
           res.end();
           resolve();
           return;

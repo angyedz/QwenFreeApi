@@ -52,6 +52,8 @@ const DEFAULT_MODEL = process.env.DEFAULT_MODEL || 'qwen3.8-max';
 const MAX_PAYLOAD_BYTES = 128 * 1024;
 
 const PORT = Number(process.env.PORT || 3265);
+// Если Qwen перестал присылать SSE, запрос не должен зависать навсегда.
+const STREAM_IDLE_TIMEOUT_MS = Number(process.env.STREAM_IDLE_TIMEOUT_MS || 180000);
 
 module.exports = {
   PROJECT_ROOT,
@@ -66,4 +68,5 @@ module.exports = {
   DEFAULT_MODEL,
   MAX_PAYLOAD_BYTES,
   PORT,
+  STREAM_IDLE_TIMEOUT_MS,
 };
