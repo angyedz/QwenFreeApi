@@ -174,17 +174,24 @@ function addTool(name, args) {
     `<span class="state running">работает…</span></div>` +
     `<div class="tool-payload">${escapeHtml(JSON.stringify(args, null, 2))}</div>`;
   a.bubble.appendChild(card);
+  // Очередь карточек: при нескольких tool calls за один ход результаты
+  // приходят в порядке вызовов (agent исполняет инструменты последовательно).
+  (a.toolCards ||= []).push(card);
   a.lastTool = card;
   scrollDown();
 }
 
 function addToolResult(name, output) {
   const a = ensureAssistant();
-  if (a.lastTool) {
-    const stateEl = a.lastTool.querySelector('.state');
+  // FIFO: результат относится к самой ранней незакрытой карточке,
+  // а не всегда к последней (иначе при parallel tool calls первый output
+  // попадал на последнюю карточку, а первая висела в «работает…»).
+  const card = (a.toolCards && a.toolCards.length > 0) ? a.toolCards.shift() : a.lastTool;
+  if (card) {
+    const stateEl = card.querySelector('.state');
     stateEl.textContent = 'готово';
     stateEl.classList.remove('running');
-    const payload = a.lastTool.querySelector('.tool-payload');
+    const payload = card.querySelector('.tool-payload');
     payload.textContent = String(output).slice(0, 6000);
     payload.classList.add('result');
   }
@@ -200,6 +207,7 @@ function ensureAssistant() {
   a.reasonEl = null;
   a.reasonText = null;
   a.lastTool = null;
+  a.toolCards = [];
   state.activeAssistant = a;
   return a;
 }
