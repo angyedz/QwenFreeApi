@@ -101,6 +101,8 @@ npm run login -- --manual
 | `QWEN_WORKSPACE` | `~/qwen-workspace` | Sandbox для терминала и файловых инструментов |
 | `QWEN_WEB_VERSION` | `0.2.83` | Версия web-клиента Qwen для upstream-запросов |
 | `DEFAULT_MODEL` | `qwen3.8-max` | Модель по умолчанию |
+| `MAX_PAYLOAD_BYTES` | `16777216` | Максимальный размер JSON-тела шлюза |
+| `STREAM_IDLE_TIMEOUT_MS` | `180000` | Таймаут SSE без новых данных, мс |
 | `LOG_LEVEL` | `info` | Уровень логирования: `debug`, `info`, `warn`, `error` |
 
 Если Qwen начинает возвращать WAF-ошибки, найдите актуальный `version` в DevTools → Network → запрос к `chat.qwen.ai` и обновите `QWEN_WEB_VERSION`.
@@ -141,7 +143,7 @@ curl http://localhost:3265/v1/chat/completions \
         "name": "Qwen 3.8 Max",
         "reasoning": true,
         "tool_call": true,
-        "limit": {"context": 32000, "output": 4096}
+        "limit": {"context": 1000000, "output": 131072}
       }
     }
   }
@@ -164,6 +166,12 @@ opencode run --model qwen/qwen3.8-max "Объясни этот код"
 - **Файлы** — чтение и изменение файлов внутри workspace.
 
 История чатов хранится в `config/chats/` и исключена из Git. Workspace можно задать через `QWEN_WORKSPACE` или API `POST /api/workspace`.
+
+### Лимиты моделей
+
+Шлюз получает доступные модели из `chat.qwen.ai` и публикует реальные лимиты контекста в `GET /v1/models` в полях `context_window` и `max_output_tokens`. Эти значения взяты из `meta.max_context_length` и соответствующих `max_*_generation_length` живого endpoint Qwen.
+
+Контекст модели и размер HTTP-запроса являются разными ограничениями. Входное JSON-тело шлюза по умолчанию ограничено 16 MiB через `MAX_PAYLOAD_BYTES`; это предотвращает неограниченное потребление памяти Node.js. История также содержит системные инструкции и tools, поэтому весь лимит модели нельзя считать доступным для пользовательских сообщений.
 
 ## API endpoints
 

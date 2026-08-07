@@ -30,7 +30,7 @@ const PORT = Number(process.env.PORT || config.PORT);
 const app = express();
 
 app.use(cors());
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: config.MAX_PAYLOAD_BYTES }));
 
 // ---------- Diagnostics ----------
 app.get('/healthz', (req, res) => {
@@ -59,6 +59,8 @@ app.get('/v1/models', (req, res) => {
       object: 'model',
       created: 1700000000,
       owned_by: 'qwen',
+      context_window: config.MODEL_LIMITS[id]?.context,
+      max_output_tokens: config.MODEL_LIMITS[id]?.output,
     })),
   });
 });

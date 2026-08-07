@@ -25,8 +25,30 @@ const BASE_MODELS = [
   'qwen3.7-plus',
   'qwen3.6-plus',
   'qwen3-coder-plus',
-  'qwen3-coder-flash',
 ];
+
+// Лимиты из авторизованного chat.qwen.ai /api/models (2026-08-07).
+// Не подставляем значения для моделей, которых upstream не объявляет.
+const MODEL_LIMITS = {
+  'qwen3.8-max': { context: 1000000, output: 131072 },
+  'qwen3.7-plus': { context: 1000000, output: 65536 },
+  'qwen3.7-max': { context: 1000000, output: 81920 },
+  'qwen3.8-max-preview': { context: 1000000, output: 65536 },
+  'qwen3.6-plus': { context: 1000000, output: 65536 },
+  'qwen3.6-max-preview': { context: 262144, output: 81920 },
+  'qwen3.6-27b': { context: 262144, output: 81920 },
+  'qwen3.5-plus': { context: 1000000, output: 65536 },
+  'qwen3.5-omni-plus': { context: 262144, output: 65536 },
+  'qwen3.6-35b-a3b': { context: 262144, output: 81920 },
+  'qwen3.5-flash': { context: 1000000, output: 65536 },
+  'qwen3.5-397b-a17b': { context: 262144, output: 65536 },
+  'qwen3.5-omni-flash': { context: 262144, output: 65536 },
+  'qwen3-max-2026-01-23': { context: 262144, output: 32768 },
+  'qwen-plus-2025-07-28': { context: 131072, output: 81920 },
+  'qwen3-coder-plus': { context: 1048576, output: 65536 },
+  'qwen3-vl-plus': { context: 262144, output: 81920 },
+  'qwen3-omni-flash-2025-12-01': { context: 65536, output: 13684 },
+};
 
 /**
  * Модели: default + те, что подхвачены из config/models-cache.json.
@@ -49,7 +71,7 @@ const MODELS = loadModelCache();
 const DEFAULT_MODEL = process.env.DEFAULT_MODEL || 'qwen3.8-max';
 
 // Лимит размера JSON тела, которое принимает WAF (защита от агент-контекстов).
-const MAX_PAYLOAD_BYTES = 128 * 1024;
+const MAX_PAYLOAD_BYTES = Number(process.env.MAX_PAYLOAD_BYTES || 16 * 1024 * 1024);
 
 const PORT = Number(process.env.PORT || 3265);
 // Если Qwen перестал присылать SSE, запрос не должен зависать навсегда.
@@ -65,6 +87,7 @@ module.exports = {
   QWEN_WEB_VERSION,
   USER_AGENT,
   MODELS,
+  MODEL_LIMITS,
   DEFAULT_MODEL,
   MAX_PAYLOAD_BYTES,
   PORT,

@@ -217,6 +217,32 @@ async function installOpencode() {
 }
 
 function providerConfig() {
+  const models = {
+    'qwen3.8-max': [1000000, 131072],
+    'qwen3.7-plus': [1000000, 65536],
+    'qwen3.7-max': [1000000, 81920],
+    'qwen3.8-max-preview': [1000000, 65536],
+    'qwen3.6-plus': [1000000, 65536],
+    'qwen3.6-max-preview': [262144, 81920],
+    'qwen3.6-27b': [262144, 81920],
+    'qwen3.5-plus': [1000000, 65536],
+    'qwen3.5-omni-plus': [262144, 65536],
+    'qwen3.6-35b-a3b': [262144, 81920],
+    'qwen3.5-flash': [1000000, 65536],
+    'qwen3.5-397b-a17b': [262144, 65536],
+    'qwen3.5-omni-flash': [262144, 65536],
+    'qwen3-max-2026-01-23': [262144, 32768],
+    'qwen-plus-2025-07-28': [131072, 81920],
+    'qwen3-coder-plus': [1048576, 65536],
+    'qwen3-vl-plus': [262144, 81920],
+    'qwen3-omni-flash-2025-12-01': [65536, 13684],
+  };
+  const modelConfig = Object.fromEntries(Object.entries(models).map(([id, [context, output]]) => [id, {
+    name: id,
+    reasoning: !id.includes('omni-flash') && !id.includes('omni-plus'),
+    tool_call: true,
+    limit: { context, output },
+  }]));
   return {
     $schema: 'https://opencode.ai/config.json',
     provider: {
@@ -227,20 +253,7 @@ function providerConfig() {
           baseURL: 'http://localhost:3265/v1',
           apiKey: 'local',
         },
-        models: {
-          'qwen3.8-max': {
-            name: 'Qwen 3.8 Max (free)',
-            reasoning: true,
-            tool_call: true,
-            limit: { context: 32000, output: 4096 },
-          },
-          'qwen3.7-max': {
-            name: 'Qwen 3.7 Max (free)',
-            reasoning: true,
-            tool_call: true,
-            limit: { context: 32000, output: 4096 },
-          },
-        },
+        models: modelConfig,
       },
     },
   };
