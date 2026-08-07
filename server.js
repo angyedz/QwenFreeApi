@@ -73,6 +73,9 @@ app.post('/v1/chat/completions', async (req, res) => {
   const streamRequested = publicBody.stream === true;
   const sessionKey = getOpenCodeSessionKey(req, publicBody);
   const compaction = isCompactionRequest(req, publicBody);
+  if (!hasExplicitSessionId(req, publicBody) && isInitialConversation(publicBody.messages)) {
+    sessionStore.clear(sessionKey);
+  }
 
   try {
     const account = accountStore.current();
@@ -206,6 +209,27 @@ function getOpenCodeSessionKey(req, body) {
   const userKey = body.user || body.metadata?.user_id || body.metadata?.userId || '';
   const seed = JSON.stringify({ model: body.model || '', user: userKey || 'default', firstUser: firstContent });
   return `derived-v2-${crypto.createHash('sha256').update(seed).digest('hex').slice(0, 32)}`;
+}
+
+function hasExplicitSessionId(req, body) {
+  const headers = req.headers || {};
+  return Boolean(
+    headers['x-opencode-session'] ||
+    headers['x-opencode-session-id'] ||
+    headers['x-session-id'] ||
+    headers['x-conversation-id'] ||
+    body.session_id || body.sessionId || body.sessionID ||
+    body.conversation_id || body.conversationId || body.conversationID ||
+    body.chat_id || body.chatId ||
+    body.metadata?.session_id || body.metadata?.sessionId || body.metadata?.sessionID ||
+    body.metadata?.conversation_id || body.metadata?.conversationId || body.metadata?.conversationID
+  );
+}
+
+function isInitialConversation(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) return true;
+  return messages.every((message) => message?.role === 'system' || message?.role === 'user') &&
+    messages.filter((message) => message?.role === 'user').length <= 1;
 }
 
 function extractSessionText(content) {
