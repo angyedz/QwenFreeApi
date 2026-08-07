@@ -29,52 +29,157 @@ function extractText(content) {
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) {
     return content
-      .filter((p) => p && p.type === 'text')
-      .map((p) => p.text || '')
+      .map((p) => {
+        if (typeof p === 'string') return p;
+        if (!p || typeof p !== 'object') return '';
+        if (typeof p.text === 'string') return p.text;
+        if (typeof p.content === 'string') return p.content;
+        return '';
+      })
       .join(' ');
+  }
+  if (content && typeof content === 'object') {
+    return extractText(content.text || content.content || content.encrypted_content || '');
   }
   return '';
 }
 
 const HISTORY_MARKER = '# Conversation history (JSONL)';
 const CURRENT_MESSAGE_MARKER = '# Current message';
+const TOOL_FOLLOW_UP_MARKER = '# Required tool follow-up';
+const COMPACTION_PROMPT = [
+  'Create a dense handoff checkpoint for another coding agent that will continue this exact task.',
+  'Preserve all user requirements and prohibitions, decisions, file paths, edits already made, tool results, failures, tests, current state, and concrete next steps.',
+  'Remove repetition and obsolete intermediate chatter. Do not call tools, do not add commentary, and output only the checkpoint text.',
+].join(' ');
+
+function compactSystemInstructions(value) {
+  const text = extractText(value).replace(/\r\n/g, '\n').trim();
+  if (!text) return '';
+
+  const sections = [];
+  const keepBlock = (open, close) => {
+    const start = text.indexOf(open);
+    if (start === -1) return;
+    const end = text.indexOf(close, start + open.length);
+    sections.push(end === -1 ? text.slice(start) : text.slice(start, end + close.length));
+  };
+
+  // OpenCode builds the system prompt from these dynamic sections. Keep their
+  // contents, but replace its long generic CLI prompt with a small contract.
+  const instructions = [...text.matchAll(/Instructions from:[\s\S]*?(?=\nInstructions from:|\n<|$)/g)].map((m) => m[0].trim());
+  sections.push(...instructions);
+  keepBlock('<mcp_instructions>', '</mcp_instructions>');
+
+  const skillsStart = text.indexOf('Skills provide specialized instructions and workflows');
+  if (skillsStart !== -1) {
+    const skillsEnd = text.indexOf('<mcp_instructions>', skillsStart);
+    sections.push(text.slice(skillsStart, skillsEnd === -1 ? text.length : skillsEnd).trim());
+  }
+
+  const base = [
+    'You are OpenCode, an interactive software-engineering agent.',
+    'Complete the user request using only capabilities exposed in this request.',
+    'The tools block in the current message is your actual interface to the local workspace. If file tools are listed, you can inspect repository files yourself; do not ask the user to paste files merely because you cannot access their filesystem outside the tools.',
+    'For a request to inspect a file such as AGENTS.md, use list_dir/read_file (or bash if listed) and report the tool result. Do not claim that the user must upload or paste the file.',
+    'Before inspecting or modifying repository files, look for Markdown instruction files in the repository (especially AGENTS.md and other relevant .md files), read the applicable ones with tools, and follow their instructions. Do not assume an instruction file exists; discover it first.',
+    'Use tools for actions. Never claim to have read, changed, searched, executed, or verified anything without a tool result.',
+    'Call tools with their exact exposed names and arguments. A tool result is not a new user question: use it to continue the original task, call more tools if needed, and answer only when the requested task is finished.',
+    'Do not invent tools, skills, MCP servers, loaders, files, database access, commands, or tool results.',
+    'Skills are usable only when a matching skill is listed and a skill-loading tool is exposed. MCP is usable only through MCP tools exposed in this request.',
+    'Follow project instructions included below when relevant. If a requested capability is unavailable, state that plainly.',
+  ];
+
+  return [...base, ...new Set(sections.filter(Boolean))].join('\n\n');
+}
 
 /**
  * Qwen web принимает ОДНО текущее сообщение. Историю сворачиваем в JSONL-конверт,
  * как делает сам интерфейс во время мультитарна. Если есть tool-протокол, внедряем
  * его в начало конверта и раскладываем tool_calls/результаты в читаемый текст.
  */
-function foldMessages(messages, toolPrompt = '') {
+function foldMessages(messages, toolPrompt = '', options = {}) {
   if (!Array.isArray(messages) || messages.length === 0) {
     return { role: 'user', content: toolPrompt || 'Hello' };
   }
   const folded = toolPrompt ? tools.foldToolMessages(messages) : messages;
   const last = folded[folded.length - 1];
+  const lastIsToolResult = last?.role === 'tool' || (
+    last?.role === 'user' && extractText(last.content).trim().startsWith('<tool_response')
+  );
+  if (options.currentOnly) {
+    const currentText = extractText(last.content).trim();
+    const parts = [];
+     if (toolPrompt) parts.push(toolPrompt);
+     if (options.compaction) parts.push(COMPACTION_PROMPT);
+    const system = folded.find((message) => message?.role === 'system');
+    const systemText = system ? compactSystemInstructions(system.content) : '';
+    if (systemText) parts.push(systemText);
+    if (currentText) parts.push(CURRENT_MESSAGE_MARKER, JSON.stringify({ role: last.role, content: currentText }));
+    if (lastIsToolResult) {
+      parts.push(
+        TOOL_FOLLOW_UP_MARKER,
+        'The current message is a tool result, not a new user request. Continue the original user task now.',
+        'Do not ask what the user wants to do with this result. Inspect the result, call the next necessary tool, or provide the concrete diagnosis/fix requested earlier.',
+      );
+    }
+    return { role: last.role || 'user', content: parts.join('\n') || 'Hello' };
+  }
   const history = folded.slice(0, -1);
 
-  const historyText = history
+  const compact = (value, limit = config.AGENT_MESSAGE_MAX_CHARS) => {
+    const text = extractText(value).trim();
+    if (text.length <= limit) return text;
+    const keep = Math.max(1000, Math.floor(limit * 0.7));
+    return `${text.slice(0, keep)}\n...[compacted ${text.length - limit} chars]...\n${text.slice(-Math.max(500, limit - keep - 40))}`;
+  };
+
+  const historyLines = history
     .map((m) => {
-      const s = extractText(m.content).trim();
+      const s = m.role === 'system' ? compactSystemInstructions(m.content) : compact(m.content);
       return s ? JSON.stringify({ role: m.role, content: s }) : '';
     })
-    .filter(Boolean)
-    .join('\n');
+    .filter(Boolean);
+  const historyBudget = Math.max(4000, config.AGENT_HISTORY_MAX_CHARS);
+  let historyText = historyLines.join('\n');
+  if (historyText.length > historyBudget) {
+    // Keep the initial user request plus the newest tool turns. Older tool
+    // results are useful less often than the current task and can be huge.
+    const first = historyLines[0] || '';
+    const recent = [];
+    let used = first.length;
+    for (let i = historyLines.length - 1; i > 0; i -= 1) {
+      const line = historyLines[i];
+      if (used + line.length + 1 > historyBudget) break;
+      recent.unshift(line);
+      used += line.length + 1;
+    }
+    historyText = [first, '... [older history compacted] ...', ...recent].filter(Boolean).join('\n');
+  }
 
   const lastText = extractText(last.content).trim();
   const parts = [];
-  if (toolPrompt) parts.push(toolPrompt);
+   if (toolPrompt) parts.push(toolPrompt);
+   if (options.compaction) parts.push(COMPACTION_PROMPT);
   if (historyText) parts.push(HISTORY_MARKER, historyText);
   if (lastText) parts.push(CURRENT_MESSAGE_MARKER, JSON.stringify({ role: last.role, content: lastText }));
+  if (lastIsToolResult) {
+    parts.push(
+      TOOL_FOLLOW_UP_MARKER,
+      'The current message is a tool result, not a new user request. Continue the original user task now.',
+      'Do not ask what the user wants to do with this result. Inspect the result, call the next necessary tool, or provide the concrete diagnosis/fix requested earlier.',
+    );
+  }
   return { role: last.role || 'user', content: parts.join('\n') || 'Hello' };
 }
 
 /**
  * Собрать полноценное тело запроса chat/completions (форма живого SPA 0.2.83).
  */
-function buildChatBody(chatId, model, messages, thinking, toolPrompt = '', search = false) {
+function buildChatBody(chatId, model, messages, thinking, toolPrompt = '', search = false, options = {}) {
   const baseType = getChatType(model);
   const chatType = search ? 'search' : baseType;
-  const { role, content } = foldMessages(messages, toolPrompt);
+  const { role, content } = foldMessages(messages, toolPrompt, options);
 
   return {
     stream: true,
@@ -121,25 +226,44 @@ function buildChatBody(chatId, model, messages, thinking, toolPrompt = '', searc
 /**
  * Подготовка запроса: создать chat_id и построить тело.
  */
-async function preparePublicPayload(openaiBody) {
+async function preparePublicPayload(openaiBody, options = {}) {
   const model = openaiBody.model || config.DEFAULT_MODEL;
   const thinking =
     openaiBody.thinking === true ||
     String(model).toLowerCase().includes('thinking') ||
     openaiBody.reasoning_effort !== undefined;
 
-  const toolPrompt = tools.buildToolPrompt(openaiBody.tools, openaiBody.tool_choice);
+  const toolPrompt = options.compaction
+    ? ''
+    : tools.buildToolPrompt(openaiBody.tools, openaiBody.tool_choice);
   const hasTools = !!toolPrompt;
   const search =
     openaiBody.search === true ||
     String(openaiBody.chat_type || '').toLowerCase() === 'search';
 
-  const chatId = await qwenClient.generateChatID(model, getChatType(model));
+  const chatId = options.chatId || (await qwenClient.generateChatID(model, getChatType(model)));
   if (!chatId) {
     throw new Error('Failed to create a Qwen chat (session/WAF). Re-login with `npm run login`.');
   }
 
-  const qwenPayload = buildChatBody(chatId, model, openaiBody.messages, thinking, toolPrompt, search);
+  const hasToolTurn = Array.isArray(openaiBody.messages) && openaiBody.messages.some(
+    (message) => message?.role === 'tool' || (message?.role === 'assistant' && Array.isArray(message.tool_calls)),
+  );
+  const qwenPayload = buildChatBody(
+    chatId,
+    model,
+    openaiBody.messages,
+    thinking,
+    toolPrompt,
+    search,
+    // A tool result must be sent with the original request and tool call. If
+    // only the last message is sent, Qwen sees an isolated JSON result and
+    // often asks the user what to do instead of continuing the task.
+    {
+      currentOnly: Boolean(options.chatId) && !hasToolTurn && !options.compaction,
+      compaction: Boolean(options.compaction),
+    },
+  );
   return { qwenPayload, model, chatId, hasTools };
 }
 
@@ -165,7 +289,9 @@ function parseQwenSSE(stream, onData, onDone, opts = {}) {
   let acceptedResponseId = null;
   let idleTimer = null;
   let emittedOutput = false;
-  let receivedUpstreamFrame = false;
+  let receivedFrames = 0;
+  let responseFrameCount = 0;
+  let lastFrameShape = '';
 
   // Upstream часто открывает несколько конкурирующих кандидатных ответов
   // (разные response_id), чьи инкрементальные кадры перемешаны. Локимся на
@@ -248,15 +374,21 @@ function parseQwenSSE(stream, onData, onDone, opts = {}) {
     } catch (_) {
       return;
     }
-    receivedUpstreamFrame = true;
+    receivedFrames += 1;
     if (obj === true || obj.data === true) return close();
     if (obj['response.created'] || obj['response.updated']) return;
     if (!acceptFrame(obj)) return;
 
     const choice = obj.choices && obj.choices[0];
-    if (!choice || !choice.delta) return;
-    const delta = choice.delta;
+    if (!choice) return;
+    responseFrameCount += 1;
+    // Qwen has returned both streaming `delta` frames and terminal-style
+    // `message`/`text` frames across web-client versions. Normalize them so a
+    // valid answer is not discarded just because its envelope changed.
+    const delta = choice.delta || {};
+    const message = choice.message || {};
     const phase = delta.phase;
+    lastFrameShape = Object.keys(delta).concat(Object.keys(message).map((key) => `message.${key}`)).join(',');
 
     let content = '';
     let reasoning = '';
@@ -274,7 +406,12 @@ function parseQwenSSE(stream, onData, onDone, opts = {}) {
     } else if (delta.reasoning_content) {
       reasoning = delta.reasoning_content;
     } else {
-      content = delta.content || '';
+      const rawContent = delta.content || delta.text || choice.text || message.content || obj.content || '';
+      content = extractText(rawContent);
+    }
+
+    if (!reasoning) {
+      reasoning = delta.reasoning_content || message.reasoning_content || obj.reasoning_content || '';
     }
 
     if (reasoning) {
@@ -334,14 +471,16 @@ function parseQwenSSE(stream, onData, onDone, opts = {}) {
       }
       if (tail.calls.length > 0) writeToolCallDeltas(tail.calls);
     }
-    // Qwen may close the SSE connection after sending response frames but omit
-    // [DONE] and finish_reason. An orderly EOF after an accepted response is
-    // still a completed upstream turn; this is common after long tool rounds.
+    // Node's `end` is orderly, but metadata-only responses are not usable
+    // completions. Qwen frequently omits [DONE] and finish_reason, so require
+    // actual output rather than a protocol terminal event.
     if (!closed) {
       close(
-        receivedUpstreamFrame
+        emittedOutput
           ? null
-          : new Error('Qwen upstream stream ended without a terminal event'),
+          : new Error(
+              `Qwen upstream closed without a usable response (frames=${receivedFrames}, choices=${responseFrameCount}, fields=${lastFrameShape || 'none'})`,
+            ),
       );
     }
   });
@@ -435,24 +574,29 @@ async function collectNonStream(stream, opts = {}) {
 /** Прокинуть SSE клиенту и завершить поток (streaming path). */
 async function pipeThroughOpenAI(stream, res, opts = {}) {
   const toolParser = opts.toolParser || null;
-  await new Promise((resolve) => {
+  const retryEmpty = typeof opts.retryEmpty === 'function' ? opts.retryEmpty : null;
+  let retryUsed = false;
+
+  const pipe = async (currentStream) => new Promise((resolve) => {
     parseQwenSSE(
-      stream,
+      currentStream,
       (line) => {
         res.write(line);
       },
       (error) => {
         if (error) {
-          const errorChunk = {
-            error: {
-              message: error.message || 'Qwen upstream stream failed',
-              type: 'upstream_error',
-            },
-          };
-          res.write(`data: ${JSON.stringify(errorChunk)}\n\n`);
-          if (opts.onError) opts.onError(error);
-          res.end();
-          resolve();
+          if (!retryUsed && retryEmpty && /^Qwen upstream closed without a usable response \(frames=0/.test(error.message)) {
+            retryUsed = true;
+            Promise.resolve(retryEmpty(error)).then((replacement) => {
+              if (replacement) {
+                pipe(replacement).then(resolve);
+                return;
+              }
+              finishWithError(error, resolve);
+            }, () => finishWithError(error, resolve));
+            return;
+          }
+          finishWithError(error, resolve);
           return;
         }
         const finalChunk = {
@@ -473,15 +617,30 @@ async function pipeThroughOpenAI(stream, res, opts = {}) {
         res.end();
         resolve();
       },
-      { toolParser }
+      { toolParser },
     );
-    stream.on('error', () => {
+    currentStream.on('error', () => {
       try {
         res.end();
       } catch (_) {}
       resolve();
     });
   });
+
+  const finishWithError = (error, resolve) => {
+    const errorChunk = {
+      error: {
+        message: error.message || 'Qwen upstream stream failed',
+        type: 'upstream_error',
+      },
+    };
+    res.write(`data: ${JSON.stringify(errorChunk)}\n\n`);
+    if (opts.onError) opts.onError(error);
+    res.end();
+    resolve();
+  };
+
+  await pipe(stream);
 }
 
 module.exports = {

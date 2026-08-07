@@ -73,6 +73,11 @@ const DEFAULT_MODEL = process.env.DEFAULT_MODEL || 'qwen3.8-max';
 // Лимит размера JSON тела, которое принимает WAF (защита от агент-контекстов).
 const MAX_PAYLOAD_BYTES = Number(process.env.MAX_PAYLOAD_BYTES || 16 * 1024 * 1024);
 
+// Keep agent prompts bounded: tool output can otherwise be copied into every
+// following Qwen request and make the upstream close before producing SSE.
+const AGENT_HISTORY_MAX_CHARS = Number(process.env.AGENT_HISTORY_MAX_CHARS || 120000);
+const AGENT_MESSAGE_MAX_CHARS = Number(process.env.AGENT_MESSAGE_MAX_CHARS || 16000);
+
 const PORT = Number(process.env.PORT || 3265);
 // Если Qwen перестал присылать SSE, запрос не должен зависать навсегда.
 const STREAM_IDLE_TIMEOUT_MS = Number(process.env.STREAM_IDLE_TIMEOUT_MS || 180000);
@@ -90,6 +95,8 @@ module.exports = {
   MODEL_LIMITS,
   DEFAULT_MODEL,
   MAX_PAYLOAD_BYTES,
+  AGENT_HISTORY_MAX_CHARS,
+  AGENT_MESSAGE_MAX_CHARS,
   PORT,
   STREAM_IDLE_TIMEOUT_MS,
 };

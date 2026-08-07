@@ -6,6 +6,8 @@
  */
 const { Readable } = require('stream');
 const { parseQwenSSE, collectNonStream } = require('../src/chat-adapter');
+const { buildChatBody } = require('../src/chat-adapter');
+const sessionStore = require('../src/session-store');
 
 const SAMPLE = [
   'data: {"response.created":{"chat_id":"abc","parent_id":"p1","response_id":"r1","response_index":"0"}}',
@@ -48,6 +50,20 @@ const makeStateOnlyStreamWithoutTerminalEvent = () => Readable.from([
 
 const makeMetadataOnlyStreamWithoutTerminalEvent = () => Readable.from([
   Buffer.from('data: {"response.created":{"response_id":"r1"}}\n'),
+]);
+
+const makeEmptyStream = () => Readable.from([]);
+
+const makeTerminalMessageStream = () => Readable.from([
+  Buffer.from('data: {"choices":[{"message":{"role":"assistant","content":"Ответ из message"}}]}\n'),
+]);
+
+const makeTextStream = () => Readable.from([
+  Buffer.from('data: {"choices":[{"text":"Ответ из text"}]}\n'),
+]);
+
+const makeArrayContentStream = () => Readable.from([
+  Buffer.from('data: {"choices":[{"delta":{"content":[{"type":"output_text","text":"Ответ из массива"}]}}]}\n'),
 ]);
 
 (async () => {
@@ -96,8 +112,81 @@ const makeMetadataOnlyStreamWithoutTerminalEvent = () => Readable.from([
     throw new Error('answer without terminal event was not accepted');
   }
 
-  await collectNonStream(makeStateOnlyStreamWithoutTerminalEvent());
-  await collectNonStream(makeMetadataOnlyStreamWithoutTerminalEvent());
+  let stateOnlyError;
+  await collectNonStream(makeStateOnlyStreamWithoutTerminalEvent()).catch((error) => {
+    stateOnlyError = error;
+  });
+  if (!stateOnlyError || !/without a usable response/.test(stateOnlyError.message)) {
+    throw new Error('state-only upstream response was accepted as a completion');
+  }
+  let unusableError;
+  await collectNonStream(makeMetadataOnlyStreamWithoutTerminalEvent()).catch((error) => {
+    unusableError = error;
+  });
+  if (!unusableError || !/without a usable response/.test(unusableError.message)) {
+    throw new Error('metadata-only upstream response was accepted as a completion');
+  }
+
+  let emptyError;
+  await collectNonStream(makeEmptyStream()).catch((error) => {
+    emptyError = error;
+  });
+  if (!emptyError || !/without a usable response/.test(emptyError.message)) {
+    throw new Error('empty upstream response was accepted as a completion');
+  }
+
+  const messageResult = await collectNonStream(makeTerminalMessageStream());
+  if (messageResult.choices[0].message.content !== 'Ответ из message') {
+    throw new Error('terminal message content was not accepted');
+  }
+
+  const textResult = await collectNonStream(makeTextStream());
+  if (textResult.choices[0].message.content !== 'Ответ из text') {
+    throw new Error('choice text content was not accepted');
+  }
+
+  const arrayResult = await collectNonStream(makeArrayContentStream());
+  if (arrayResult.choices[0].message.content !== 'Ответ из массива') {
+    throw new Error('array content was not accepted');
+  }
+
+  const retained = buildChatBody(
+    'qwen-chat-1',
+    'qwen3.8-max',
+    [
+      { role: 'user', content: 'initial task' },
+      { role: 'assistant', content: 'previous answer' },
+      { role: 'user', content: 'next step' },
+    ],
+    false,
+    'tool protocol',
+    false,
+    { currentOnly: true },
+  );
+  if (retained.messages[0].content.includes('initial task') || !retained.messages[0].content.includes('next step')) {
+    throw new Error('reused Qwen chat payload included old history');
+  }
+
+  const compaction = buildChatBody(
+    'qwen-chat-2',
+    'qwen3.8-max',
+    [{ role: 'user', content: 'task and completed tool results' }],
+    false,
+    '',
+    false,
+    { compaction: true },
+  );
+  if (!compaction.messages[0].content.includes('dense handoff checkpoint')) {
+    throw new Error('compaction handoff prompt was not included');
+  }
+
+  const stateKey = `offline-test-${Date.now()}`;
+  sessionStore.set(stateKey, 'chat-state', { awaitingCompactedHistory: true });
+  const state = sessionStore.getRecord(stateKey);
+  if (!state || state.chatId !== 'chat-state' || !state.awaitingCompactedHistory) {
+    throw new Error('compaction session state was not persisted');
+  }
+  sessionStore.clear(stateKey);
 
   // Upstream failures must not be converted into a successful stream ending.
   let streamError;

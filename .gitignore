@@ -7,6 +7,7 @@ config/account.json.migrated
 config/accounts/*.json
 config/models-cache.json
 config/chats/*.json
+config/opencode-sessions.json
 config/browser-profile/
 qwen-workspace/
 

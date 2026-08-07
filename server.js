@@ -16,6 +16,7 @@ require('dotenv').config();
 
 const express = require('express');
 const cors = require('cors');
+const crypto = require('crypto');
 const config = require('./src/config');
 const accountStore = require('./src/account-store');
 const ssxmodManager = require('./src/ssxmod-manager');
@@ -24,6 +25,7 @@ const chatAdapter = require('./src/chat-adapter');
 const tools = require('./src/tools');
 const web = require('./src/web');
 const toolExecutor = require('./src/tool-executor');
+const sessionStore = require('./src/session-store');
 const { logger } = require('./src/util');
 
 const PORT = Number(process.env.PORT || config.PORT);
@@ -69,6 +71,8 @@ app.get('/v1/models', (req, res) => {
 app.post('/v1/chat/completions', async (req, res) => {
   const publicBody = req.body || {};
   const streamRequested = publicBody.stream === true;
+  const sessionKey = getOpenCodeSessionKey(req, publicBody);
+  const compaction = isCompactionRequest(req, publicBody);
 
   try {
     const account = accountStore.current();
@@ -81,7 +85,16 @@ app.post('/v1/chat/completions', async (req, res) => {
       });
     }
 
-    const prepared = await chatAdapter.preparePublicPayload(publicBody);
+    const record = sessionStore.getRecord(sessionKey);
+    // Compaction is generated in the current Qwen thread. The following normal
+    // turn rolls over to a fresh thread, carrying the client's checkpoint.
+    const rollover = Boolean(record && record.awaitingCompactedHistory && !compaction);
+    const existingChatId = rollover ? null : record?.chatId || null;
+    const prepared = await chatAdapter.preparePublicPayload(publicBody, {
+      chatId: existingChatId,
+      compaction,
+    });
+    sessionStore.set(sessionKey, prepared.chatId, { awaitingCompactedHistory: compaction });
     const response = await qwenClient.sendChatRequest(prepared.qwenPayload, account);
 
     if (!response || !response.status) {
@@ -115,6 +128,16 @@ app.post('/v1/chat/completions', async (req, res) => {
     await chatAdapter.pipeThroughOpenAI(upstream, res, {
       toolParser: prepared.hasTools ? tools.createToolCallStreamParser() : null,
       onError: (error) => accountStore.markFailure(response.account, error.message),
+      retryEmpty: async () => {
+        // A zero-frame response usually means the upstream chat session died.
+        // Reusing the same chat_id just reproduces the empty stream, so create
+        // a fresh upstream session while preserving the original request.
+        sessionStore.clear(sessionKey);
+        const retryPrepared = await chatAdapter.preparePublicPayload(publicBody);
+        sessionStore.set(sessionKey, retryPrepared.chatId, { awaitingCompactedHistory: compaction });
+        const retry = await qwenClient.sendChatRequest(retryPrepared.qwenPayload);
+        return retry.status ? retry.response : null;
+      },
     });
   } catch (err) {
     logger.error(`[chat/completions] ${err.message}`, 'SERVER', err);
@@ -125,6 +148,54 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
   }
 });
+
+function getOpenCodeSessionKey(req, body) {
+  const headers = req.headers || {};
+  const value =
+    headers['x-opencode-session'] ||
+    headers['x-opencode-session-id'] ||
+    headers['x-session-id'] ||
+    headers['x-conversation-id'] ||
+    body.session_id ||
+    body.sessionId ||
+    body.sessionID ||
+    body.conversation_id ||
+    body.conversationId ||
+    body.conversationID ||
+    body.chat_id ||
+    body.chatId ||
+    body.metadata?.session_id ||
+    body.metadata?.sessionId ||
+    body.metadata?.sessionID ||
+    body.metadata?.conversation_id ||
+    body.metadata?.conversationId ||
+    body.metadata?.conversationID;
+  if (value) return String(value).trim();
+
+  // Some OpenAI-compatible clients omit all session metadata and may send a
+  // different subset of messages on every turn. Never derive this key from
+  // message content: after a tool call that would create a new Qwen chat and
+  // make the model forget the original request. Explicit session metadata
+  // above remains the preferred isolation mechanism.
+  const userKey = body.user || body.metadata?.user_id || body.metadata?.userId || '';
+  const seed = JSON.stringify({ model: body.model || '', user: userKey || 'default' });
+  return `derived-${crypto.createHash('sha256').update(seed).digest('hex').slice(0, 32)}`;
+}
+
+function isCompactionRequest(req, body) {
+  const headers = req.headers || {};
+  const marker = String(
+    headers['x-opencode-compaction'] || headers['x-context-compaction'] || body.compaction || body.context_compaction || '',
+  ).toLowerCase();
+  if (marker === 'true' || marker === '1' || marker === 'compact' || marker === 'compaction') return true;
+  const messages = Array.isArray(body.messages) ? body.messages : [];
+  return messages.some((message) => {
+    const content = message?.content;
+    if (Array.isArray(content) && content.some((part) => part?.type === 'compaction')) return true;
+    if (content && typeof content === 'object' && content.type === 'compaction') return true;
+    return /^\s*(context compaction|conversation summary)\s*$/i.test(String(content || ''));
+  });
+}
 
 // ---------- Boot ----------
 ssxmodManager.init();
