@@ -1,4 +1,5 @@
 'use strict';
+// PR by @SsalArt52 - agent context fix
 
 const path = require('path');
 const fs = require('fs');
@@ -11,7 +12,7 @@ const CACHE_FILE = path.join(CONFIG_DIR, 'models-cache.json');
 
 const BASE_URL = 'https://chat.qwen.ai';
 
-// SPA build id — Qwen требует совпадения версии фронта.
+// SPA build id - Qwen требует совпадения версии фронта.
 // Значение 0.2.83 сверено с живым FE (см. DevTools -> Network -> version).
 const QWEN_WEB_VERSION = process.env.QWEN_WEB_VERSION || '0.2.83';
 
@@ -67,7 +68,7 @@ function loadModelCache() {
 
 const MODELS = loadModelCache();
 
-// Реальная модель по умолчанию в живом FE — qwen3.8-max, но через /v1 можно просить любую.
+// Реальная модель по умолчанию в живом FE - qwen3.8-max, но через /v1 можно просить любую.
 const DEFAULT_MODEL = process.env.DEFAULT_MODEL || 'qwen3.8-max';
 
 // Лимит размера JSON тела, которое принимает WAF (защита от агент-контекстов).
@@ -75,12 +76,26 @@ const MAX_PAYLOAD_BYTES = Number(process.env.MAX_PAYLOAD_BYTES || 16 * 1024 * 10
 
 // Keep agent prompts bounded: tool output can otherwise be copied into every
 // following Qwen request and make the upstream close before producing SSE.
-const AGENT_HISTORY_MAX_CHARS = Number(process.env.AGENT_HISTORY_MAX_CHARS || 120000);
-const AGENT_MESSAGE_MAX_CHARS = Number(process.env.AGENT_MESSAGE_MAX_CHARS || 16000);
+// FIX: increased defaults - 120k chars was ~30k tokens, far below 1M context.
+// For coding agents with large repos we need much larger budget; actual limit
+// is now model-aware (see getHistoryBudget in chat-adapter.js) but this is the floor.
+const AGENT_HISTORY_MAX_CHARS = Number(process.env.AGENT_HISTORY_MAX_CHARS || 350000);
+const AGENT_MESSAGE_MAX_CHARS = Number(process.env.AGENT_MESSAGE_MAX_CHARS || 30000);
 
 const PORT = Number(process.env.PORT || 3265);
 // Если Qwen перестал присылать SSE, запрос не должен зависать навсегда.
 const STREAM_IDLE_TIMEOUT_MS = Number(process.env.STREAM_IDLE_TIMEOUT_MS || 180000);
+
+// Helper: history budget for a given model (chars ≈ tokens * 3.5)
+function getHistoryBudget(model) {
+  const limit = MODEL_LIMITS[model]?.context;
+  if (!limit) return AGENT_HISTORY_MAX_CHARS;
+  // Reserve ~30% for system prompt + current message + tool output
+  // Use 3 chars per token as rough estimate
+  const estimated = Math.floor(limit * 3.0 * 0.7);
+  // Clamp between floor and 800k to avoid OOM on 1M models
+  return Math.max(AGENT_HISTORY_MAX_CHARS, Math.min(800000, estimated));
+}
 
 module.exports = {
   PROJECT_ROOT,
@@ -99,4 +114,5 @@ module.exports = {
   AGENT_MESSAGE_MAX_CHARS,
   PORT,
   STREAM_IDLE_TIMEOUT_MS,
+  getHistoryBudget,
 };

@@ -1,4 +1,5 @@
 'use strict';
+// PR by @SsalArt52 - agent context fix
 
 const { generateUUID, logger } = require('./util');
 
@@ -127,6 +128,10 @@ const escapeAttr = (s) =>
 /**
  * Convert OpenAI assistant.tool_calls and role:'tool' messages into text that the
  * web-facing Qwen accepts (it only understands plain user/assistant content).
+ *
+ * FIX: correctly handle multiple tool_calls per assistant turn (parallel calls),
+ * which OpenCode / coding agents use heavily. Previously only tool_calls[0] was
+ * folded, silently dropping the rest and breaking multi-file reads.
  */
 function foldToolMessages(messages) {
   if (!Array.isArray(messages)) return messages;
@@ -135,26 +140,37 @@ function foldToolMessages(messages) {
     if (!m || typeof m !== 'object') return m;
 
     if (m.role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length > 0) {
-      const id = m.tool_calls[0]?.id || `call_${generateUUID().replace(/-/g, '').slice(0, 24)}`;
-      const call = m.tool_calls[0];
-      let args = typeof call.function?.arguments === 'string' ? call.function.arguments : '{}';
-      try {
-        args = JSON.parse(args);
-      } catch (_) {
-        /* keep raw */
-      }
-      const name = call.function?.name || 'tool';
-      idToName.set(id, name);
-      const block = `${TOOL_CALL_OPEN}\n${JSON.stringify({ id, name, arguments: args })}\n${TOOL_CALL_CLOSE}`;
-      const original = typeof m.content === 'string' ? m.content : '';
-      return { role: 'assistant', content: [original, block].filter(Boolean).join('\n') };
+      const blocks = m.tool_calls.map((call) => {
+        const id = call?.id || `call_${generateUUID().replace(/-/g, '').slice(0, 24)}`;
+        let args = typeof call.function?.arguments === 'string' ? call.function.arguments : call.function?.arguments ?? '{}';
+        try {
+          args = typeof args === 'string' ? JSON.parse(args) : args;
+        } catch (_) {
+          // keep raw string as-is inside JSON
+          args = call.function?.arguments ?? {};
+        }
+        const name = call.function?.name || call.name || 'tool';
+        idToName.set(id, name);
+        // also map by index-less fallback for tool responses that omit id
+        const block = `${TOOL_CALL_OPEN}\n${JSON.stringify({ id, name, arguments: args })}\n${TOOL_CALL_CLOSE}`;
+        return block;
+      });
+      // Preserve original text content (may be array content)
+      let original = '';
+      if (typeof m.content === 'string') original = m.content;
+      else if (Array.isArray(m.content)) {
+        original = m.content.map(p => typeof p === 'string' ? p : (p.text || p.content || '')).join('\n');
+      } else if (m.content) original = String(m.content);
+      return { role: 'assistant', content: [original, ...blocks].filter(Boolean).join('\n') };
     }
 
     if (m.role === 'tool') {
-      const callId = m.tool_call_id || '';
+      const callId = m.tool_call_id || m.tool_call_id === 0 ? String(m.tool_call_id) : '';
       const name = m.name || idToName.get(callId) || 'tool';
-      const content =
-        typeof m.content === 'string' ? m.content || 'null' : JSON.stringify(m.content ?? null);
+      let content;
+      if (typeof m.content === 'string') content = m.content || 'null';
+      else if (m.content === null || m.content === undefined) content = 'null';
+      else content = JSON.stringify(m.content ?? null);
       const idAttr = callId ? ` tool_call_id="${escapeAttr(callId)}"` : '';
       return {
         role: 'user',

@@ -1,4 +1,5 @@
 'use strict';
+// PR by @SsalArt52 - agent context fix
 
 const config = require('./config');
 const qwenClient = require('./qwen-client');
@@ -8,7 +9,7 @@ const { generateUUID, logger } = require('./util');
 /**
  * Мост между OpenAI-форматом (клиент) и Qwen Chat v2 SSE-форматом.
  *
- * КРИТИЧНО: upstream chat/completions не принимает «минимальное» тело — только
+ * КРИТИЧНО: upstream chat/completions не принимает «минимальное» тело - только
  * точную форму запроса, которую шлёт живой SPA (version:'2.1', полная обёртка
  * сообщения с user_action/files/models/feature_config/extra.meta.subChatType).
  * При любой другой форме Aliyun WAF отвечает FAIL_SYS_USER_VALIDATE (x5sec-капча).
@@ -33,10 +34,14 @@ function extractText(content) {
         if (typeof p === 'string') return p;
         if (!p || typeof p !== 'object') return '';
         if (typeof p.text === 'string') return p.text;
+        if (p.type === 'text' && typeof p.text === 'string') return p.text;
+        if (p.type === 'image_url') return ''; // images not forwarded as text
         if (typeof p.content === 'string') return p.content;
+        // OpenAI content parts may be {type:'text', text:'...'}
+        if (p.text && typeof p.text === 'object' && typeof p.text.content === 'string') return p.text.content;
         return '';
       })
-      .join(' ');
+      .join('\n');
   }
   if (content && typeof content === 'object') {
     return extractText(content.text || content.content || content.encrypted_content || '');
@@ -64,6 +69,11 @@ function compactSystemInstructions(value) {
   const text = extractText(value).replace(/\r\n/g, '\n').trim();
   if (!text) return '';
 
+  // If system is relatively small, keep it verbatim - coding agents put
+  // repo file tree + AGENTS.md + custom instructions there. Dropping them
+  // breaks context.
+  if (text.length < 12000) return text;
+
   const sections = [];
   const keepBlock = (open, close) => {
     const start = text.indexOf(open);
@@ -84,6 +94,12 @@ function compactSystemInstructions(value) {
     sections.push(text.slice(skillsStart, skillsEnd === -1 ? text.length : skillsEnd).trim());
   }
 
+  // Preserve project-specific header if present (first 4000 chars often hold repo rules)
+  const header = text.slice(0, 4000);
+  if (header && !sections.some(s => s.includes(header.slice(0, 80)))) {
+    sections.unshift(header);
+  }
+
   const base = [
     'You are OpenCode, an interactive software-engineering agent.',
     'Complete the user request using only capabilities exposed in this request.',
@@ -97,7 +113,10 @@ function compactSystemInstructions(value) {
     'Follow project instructions included below when relevant. If a requested capability is unavailable, state that plainly.',
   ];
 
-  return [...base, ...new Set(sections.filter(Boolean))].join('\n\n');
+  const merged = [...base, ...new Set(sections.filter(Boolean))].join('\n\n');
+  // Hard cap at 18000 to stay safe but keep more than before
+  if (merged.length > 18000) return merged.slice(0, 18000) + '\n...[system truncated]...';
+  return merged;
 }
 
 /**
@@ -140,11 +159,16 @@ function foldMessages(messages, toolPrompt = '', options = {}) {
       return s ? JSON.stringify({ role: m.role, content: s }) : '';
     })
     .filter(Boolean);
-  const historyBudget = Math.max(4000, config.AGENT_HISTORY_MAX_CHARS);
+  // Model-aware budget: 1M context → ~800k chars, 256k → ~350k
+  const modelForBudget = options.model || config.DEFAULT_MODEL;
+  const historyBudget = typeof config.getHistoryBudget === 'function'
+    ? config.getHistoryBudget(modelForBudget)
+    : Math.max(4000, config.AGENT_HISTORY_MAX_CHARS);
   let historyText = historyLines.join('\n');
   if (historyText.length > historyBudget) {
     // Keep the initial user request plus the newest tool turns. Older tool
     // results are useful less often than the current task and can be huge.
+    // Prioritize keeping system (line 0 if system) + first user + recent.
     const first = historyLines[0] || '';
     const recent = [];
     let used = first.length;
@@ -179,7 +203,7 @@ function foldMessages(messages, toolPrompt = '', options = {}) {
 function buildChatBody(chatId, model, messages, thinking, toolPrompt = '', search = false, options = {}) {
   const baseType = getChatType(model);
   const chatType = search ? 'search' : baseType;
-  const { role, content } = foldMessages(messages, toolPrompt, options);
+  const { role, content } = foldMessages(messages, toolPrompt, { ...options, model });
 
   return {
     stream: true,
@@ -262,6 +286,7 @@ async function preparePublicPayload(openaiBody, options = {}) {
     {
       currentOnly: Boolean(options.chatId) && !hasToolTurn && !options.compaction,
       compaction: Boolean(options.compaction),
+      model,
     },
   );
   return { qwenPayload, model, chatId, hasTools };
@@ -273,7 +298,7 @@ const THINK_PHASES = new Set(['think', 'thinking', 'thinking_summary']);
 
 /**
  * Разбор upstream SSE. Каждый значимый фрагмент вызывает onData(line).
- *  - thinking_summary: `extra.summary_thought.content` — растущий массив абзацев,
+ *  - thinking_summary: `extra.summary_thought.content` - растущий массив абзацев,
  *    выдаём только новые (инкрементально), чтобы не дублировать reasoning.
  *  - answer: content. Если включён tool-режим, контент прогоняется через
  *    XML-парсер и транслируется в OpenAI tool_calls delta.

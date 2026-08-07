@@ -1,6 +1,7 @@
 #!/usr/bin/env node
+// PR by @SsalArt52 - agent context fix (multi-tool + budget + session isolation)
 /**
- * Qwen Free API — локальный бесшовный OpenAI-прокси к Qwen Chat v2 API.
+ * Qwen Free API - локальный бесшовный OpenAI-прокси к Qwen Chat v2 API.
  *
  * Обходит Aliyun WAF через генерацию SSXMOD-cookie в чистом JS
  * (без браузера на каждый запрос). Требуется только аккаунт Qwen Chat.
@@ -183,6 +184,7 @@ function getOpenCodeSessionKey(req, body) {
     headers['x-opencode-session-id'] ||
     headers['x-session-id'] ||
     headers['x-conversation-id'] ||
+    headers['x-opencode-request-id'] ||
     body.session_id ||
     body.sessionId ||
     body.sessionID ||
@@ -199,16 +201,23 @@ function getOpenCodeSessionKey(req, body) {
     body.metadata?.conversationID;
   if (value) return String(value).trim();
 
-  // OpenCode normally supplies one of the explicit IDs above. For clients that
-  // omit them, use the first user turn as the conversation boundary instead of
-  // one global model/user key. The full message list is sent on follow-ups, so
-  // this remains stable through tool calls while separating newly-created chats.
+  // Fallback derived key - must be stable across tool-call turns but isolated
+  // per task/repo. Previous version only hashed firstUser 4000 chars + model + user,
+  // causing collisions when same prompt is used in different repos or with
+  // different system prompts / tool sets.
   const messages = Array.isArray(body.messages) ? body.messages : [];
   const firstUser = messages.find((message) => message?.role === 'user');
   const firstContent = extractSessionText(firstUser?.content);
+  const systemMsg = messages.find((m) => m?.role === 'system');
+  const systemHash = systemMsg ? hashText(extractSessionText(systemMsg.content).slice(0, 8000)) : 'no-system';
+  const toolHash = Array.isArray(body.tools) && body.tools.length
+    ? hashText(body.tools.map(t => t.function?.name || t.function?.name || '').sort().join(','))
+    : 'no-tools';
   const userKey = body.user || body.metadata?.user_id || body.metadata?.userId || '';
-  const seed = JSON.stringify({ model: body.model || '', user: userKey || 'default', firstUser: firstContent });
-  return `derived-v2-${crypto.createHash('sha256').update(seed).digest('hex').slice(0, 32)}`;
+  // Hash full first user content (not just 4000) to avoid collisions on long templates
+  const firstHash = hashText(firstContent);
+  const seed = JSON.stringify({ model: body.model || '', user: userKey || 'default', firstHash, systemHash, toolHash });
+  return `derived-v3-${crypto.createHash('sha256').update(seed).digest('hex').slice(0, 32)}`;
 }
 
 function hasExplicitSessionId(req, body) {
@@ -218,6 +227,7 @@ function hasExplicitSessionId(req, body) {
     headers['x-opencode-session-id'] ||
     headers['x-session-id'] ||
     headers['x-conversation-id'] ||
+    headers['x-opencode-request-id'] ||
     body.session_id || body.sessionId || body.sessionID ||
     body.conversation_id || body.conversationId || body.conversationID ||
     body.chat_id || body.chatId ||
@@ -232,13 +242,18 @@ function isInitialConversation(messages) {
     messages.filter((message) => message?.role === 'user').length <= 1;
 }
 
+function hashText(s) {
+  return crypto.createHash('sha256').update(String(s || '')).digest('hex').slice(0, 16);
+}
+
 function extractSessionText(content) {
-  if (typeof content === 'string') return content.trim().slice(0, 4000);
+  if (typeof content === 'string') return content.trim().slice(0, 8000);
   if (Array.isArray(content)) {
     return content.map((part) => {
       if (typeof part === 'string') return part;
-      return part?.text || part?.content || '';
-    }).join(' ').trim().slice(0, 4000);
+      if (!part || typeof part !== 'object') return '';
+      return part?.text || part?.content || part?.input_text || '';
+    }).join('\n').trim().slice(0, 8000);
   }
   if (content && typeof content === 'object') return extractSessionText(content.text || content.content || '');
   return '';
