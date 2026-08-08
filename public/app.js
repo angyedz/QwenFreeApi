@@ -174,17 +174,21 @@ function addTool(name, args) {
     `<span class="state running">работает…</span></div>` +
     `<div class="tool-payload">${escapeHtml(JSON.stringify(args, null, 2))}</div>`;
   a.bubble.appendChild(card);
+  // FIFO queue for parallel tool calls: results arrive in call order
+  (a.toolCards ||= []).push(card);
   a.lastTool = card;
   scrollDown();
 }
 
 function addToolResult(name, output) {
   const a = ensureAssistant();
-  if (a.lastTool) {
-    const stateEl = a.lastTool.querySelector('.state');
+  // FIFO: earliest unclosed card, not always last — fixes parallel calls where first result landed on last card
+  const card = (a.toolCards && a.toolCards.length > 0) ? a.toolCards.shift() : a.lastTool;
+  if (card) {
+    const stateEl = card.querySelector('.state');
     stateEl.textContent = 'готово';
     stateEl.classList.remove('running');
-    const payload = a.lastTool.querySelector('.tool-payload');
+    const payload = card.querySelector('.tool-payload');
     payload.textContent = String(output).slice(0, 6000);
     payload.classList.add('result');
   }
@@ -200,6 +204,7 @@ function ensureAssistant() {
   a.reasonEl = null;
   a.reasonText = null;
   a.lastTool = null;
+  a.toolCards = [];
   state.activeAssistant = a;
   return a;
 }
@@ -214,6 +219,8 @@ function finishAssistant() {
       a.textEl.innerHTML = renderMarkdown(a.raw || '');
     }
     if (a.reasonEl) a.reasonEl.classList.remove('streaming');
+    // clear FIFO queue for next assistant message
+    if (a.toolCards) a.toolCards = [];
   }
   state.activeAssistant = null;
 }

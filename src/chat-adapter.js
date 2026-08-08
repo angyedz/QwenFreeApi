@@ -270,9 +270,7 @@ async function preparePublicPayload(openaiBody, options = {}) {
     throw new Error('Failed to create a Qwen chat (session/WAF). Re-login with `npm run login`.');
   }
 
-  const hasToolTurn = Array.isArray(openaiBody.messages) && openaiBody.messages.some(
-    (message) => message?.role === 'tool' || (message?.role === 'assistant' && Array.isArray(message.tool_calls)),
-  );
+  // FIX O(n²): with existing chatId Qwen thread already holds prior folded turns, so no need to re-embed full history. Previous `!hasToolTurn` duplicated context 2x/3x... and confused model.
   const qwenPayload = buildChatBody(
     chatId,
     model,
@@ -280,11 +278,8 @@ async function preparePublicPayload(openaiBody, options = {}) {
     thinking,
     toolPrompt,
     search,
-    // A tool result must be sent with the original request and tool call. If
-    // only the last message is sent, Qwen sees an isolated JSON result and
-    // often asks the user what to do instead of continuing the task.
     {
-      currentOnly: Boolean(options.chatId) && !hasToolTurn && !options.compaction,
+      currentOnly: Boolean(options.chatId) && !options.compaction,
       compaction: Boolean(options.compaction),
       model,
     },
