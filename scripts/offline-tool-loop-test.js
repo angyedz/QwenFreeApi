@@ -9,6 +9,9 @@
  *     even on tool turns (no history re-embedding, no O(n^2) growth).
  *  C. agent.runTurn end-to-end: tool call -> local execution -> follow-up round
  *     reuses the same upstream thread and carries the tool result exactly once.
+ *  D. Compaction request: full history + handoff prompt, tool protocol omitted.
+ *  E. agent.runTurn with a dead thread (frames=0): one retry on a fresh thread
+ *     with the full context re-sent.
  *
  * Run: node scripts/offline-tool-loop-test.js
  */
@@ -132,6 +135,66 @@ const TOOL_TURN_MESSAGES = [
     'C8: tool result stored in chat history',
   );
   console.log('PASS C: agent tool loop end-to-end');
+
+  // --- D. Compaction request: full history + handoff prompt, no tool protocol ---
+  const compacted = await chatAdapter.preparePublicPayload(
+    { model: 'qwen3.8-max', messages: TOOL_TURN_MESSAGES, tools: toolExecutorMock.TOOL_DEFS, stream: true },
+    { chatId: 'existing-chat-42', compaction: true },
+  );
+  const compactedContent = compacted.qwenPayload.messages[0].content;
+  assert.ok(compactedContent.includes('dense handoff checkpoint'), 'D1: compaction handoff prompt included');
+  assert.ok(compactedContent.includes('# Conversation history'), 'D2: compaction keeps full history in the current thread');
+  assert.ok(!compactedContent.includes('# Tools'), 'D3: tool protocol omitted on compaction');
+  console.log('PASS D: compaction sends full history + handoff prompt without tool protocol');
+
+  // --- E. agent.runTurn: dead thread (frames=0) -> one retry on a fresh thread ---
+  const retryPayloads = [];
+  let generatedIds = 0;
+  Module._load = function (request, parent, isMain) {
+    if (request === './qwen-client') {
+      return {
+        async generateChatID() {
+          generatedIds += 1;
+          return `chat-retry-${generatedIds}`;
+        },
+        async sendChatRequest(payload) {
+          retryPayloads.push(payload);
+          if (retryPayloads.length === 1) {
+            // Пустой стрим без единого кадра -> parseQwenSSE отдаёт frames=0 ошибку.
+            return { status: true, response: Readable.from([]), account: { id: 'mock' } };
+          }
+          return {
+            status: true,
+            response: Readable.from([
+              'data: {"choices":[{"delta":{"phase":"answer","content":"Ответ после ретрая"}}]}\n\n',
+              'data: {"choices":[{"delta":{"phase":"answer","status":"finished","content":""}}]}\n\n',
+            ]),
+            account: { id: 'mock' },
+          };
+        },
+      };
+    }
+    if (request === './tool-executor') return toolExecutorMock;
+    return origLoad.call(this, request, parent, isMain);
+  };
+  // Пере-требуем agent и chat-adapter, чтобы их привязка к './qwen-client'
+  // указывала на retry-мок (кэш предыдущих тестов иначе держит старый мок).
+  for (const m of ['../src/agent', '../src/chat-adapter']) {
+    delete require.cache[require.resolve(m)];
+  }
+  const agentRetry = require('../src/agent');
+
+  const retryChat = { model: 'qwen3.8-max', settings: { terminal: false, webSearch: false }, messages: [] };
+  const retryFinal = await agentRetry.runTurn(retryChat, 'привет', () => {});
+
+  assert.strictEqual(retryPayloads.length, 2, 'E1: exactly two upstream attempts');
+  assert.strictEqual(retryFinal.content, 'Ответ после ретрая', 'E2: final answer from the retry');
+  assert.strictEqual(retryChat.qwenChatId, 'chat-retry-2', 'E3: chat moved to the fresh thread');
+  assert.ok(
+    retryPayloads[1].messages[0].content.includes('привет'),
+    'E4: retry on the fresh thread carries the user message',
+  );
+  console.log('PASS E: dead thread triggers one retry on a fresh thread');
 
   console.log('\nALL OFFLINE TESTS PASSED');
 })().catch((err) => {
