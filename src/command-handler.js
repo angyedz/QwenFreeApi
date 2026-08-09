@@ -17,6 +17,7 @@
  *  - $help
  */
 
+const { spawn, execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const config = require('./config');
@@ -24,6 +25,33 @@ const accountStore = require('./account-store');
 const toolMemo = require('./tool-memo');
 const sessionStore = require('./session-store');
 const qwenClient = require('./qwen-client');
+
+function triggerSelfUpdate() {
+  const repoDir = path.resolve(__dirname, '..');
+  const updateScript = `sleep 0.5 && cd "${repoDir}" && git pull origin master && systemctl --user restart qwen-free-api.service`;
+  const child = spawn('/bin/bash', ['-c', updateScript], {
+    detached: true,
+    stdio: 'ignore',
+  });
+  child.unref();
+}
+
+function checkUpdates() {
+  const repoDir = path.resolve(__dirname, '..');
+  try {
+    execSync(`cd "${repoDir}" && git fetch origin master`, { timeout: 8000, stdio: 'ignore' });
+    const local = execSync(`cd "${repoDir}" && git rev-parse --short HEAD`, { encoding: 'utf8' }).trim();
+    const remote = execSync(`cd "${repoDir}" && git rev-parse --short origin/master`, { encoding: 'utf8' }).trim();
+    const behindCount = execSync(`cd "${repoDir}" && git rev-list --count HEAD..origin/master`, { encoding: 'utf8' }).trim();
+
+    if (local === remote || behindCount === '0') {
+      return `✅ **Qwen Free API is Up To Date**\n\n- **Current Version:** \`${local}\` (latest)\n- **Status:** All changes synced with GitHub origin/master.`;
+    }
+    return `🔍 **Update Available for Qwen Free API!**\n\n- **Current Version:** \`${local}\`\n- **Latest Version:** \`${remote}\` (${behindCount} commit(s) behind)\n\n*Run \`$qwen-api update\` to apply the update automatically.*`;
+  } catch (e) {
+    return `⚠️ **Update Check Failed**: ${e.message}`;
+  }
+}
 
 const disabledSessions = new Set();
 const startTime = Date.now();
@@ -87,7 +115,16 @@ async function handleCommand(messages, sessionKey, req, res) {
 
   let responseText = '';
 
-  if (cmd === 'compressor' || cmd === 'comp') {
+  if (cmd === 'check' || cmd === 'check-update' || cmd === 'checkupdate') {
+    responseText = checkUpdates();
+  } else if (cmd === 'update' || cmd === 'upgrade') {
+    triggerSelfUpdate();
+    responseText = `🚀 **Qwen Free API Self-Updater Initiated**\n\n` +
+      `- **Action:** Pulling latest code from GitHub \`master\`...\n` +
+      `- **Process:** Independent detached background worker initialized.\n` +
+      `- **Service:** Restarting \`qwen-free-api.service\`...\n\n` +
+      `*Check status in a few seconds via \`$qwen-api stats\`.*`;
+  } else if (cmd === 'compressor' || cmd === 'comp') {
     if (arg1 === 'off' || arg1 === 'disable' || arg1 === 'false' || arg1 === '0') {
       disabledSessions.add(sessionKey);
       responseText = '⚡ **Compressor System**\n\nContext compaction/folding has been **DISABLED** for this session.';
