@@ -1,0 +1,31 @@
+node_modules/
+
+# Local credentials and generated runtime data
+.env
+config/account.json
+config/account.json.migrated
+config/accounts/*.json
+config/models-cache.json
+config/chats/*.json
+config/opencode-sessions.json
+config/browser-profile/
+qwen-workspace/
+
+# Logs, test output and local tooling
+*.log
+*.tmp
+*.swp
+coverage/
+.nyc_output/
+.playwright/
+playwright-report/
+test-results/
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+post.md
+.post.md.kate-swp
+config/memo.json
